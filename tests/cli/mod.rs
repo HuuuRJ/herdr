@@ -8,6 +8,8 @@ mod panes;
 mod plugins;
 mod protocol;
 mod protocol_guard;
+mod providers;
 mod sessions;
 mod surface;
+mod workflows;
 mod workspace;

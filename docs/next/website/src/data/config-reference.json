@@ -1417,6 +1417,24 @@
       ]
     },
     {
+      "id": "workflow",
+      "title": "Workflow",
+      "keys": [
+        {
+          "key": "workflow.max_concurrent_agents",
+          "type": "integer",
+          "default": "3",
+          "description": "Global cap on concurrently running workflow agent nodes across all runs."
+        },
+        {
+          "key": "workflow.keep_runs",
+          "type": "integer",
+          "default": "20",
+          "description": "How many finished workflow runs to keep on disk; older runs are pruned automatically."
+        }
+      ]
+    },
+    {
       "id": "remote",
       "title": "Remote",
       "keys": [

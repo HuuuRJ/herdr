@@ -1,9 +1,12 @@
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use crate::{
     app::{
-        state::{AppState, SettingsSection, THEME_NAMES},
+        state::{
+            AppState, ProviderDraft, ProviderEditField, ProviderFieldEdit, ProvidersSectionState,
+            SettingsSection, PROVIDER_MENU_ITEMS, THEME_NAMES,
+        },
         App, Mode,
     },
     config::{StatusIndicatorStyle, ToastDelivery},
@@ -19,6 +22,14 @@ pub(super) enum SettingsAction {
     SaveToastDelivery(ToastDelivery),
     SaveAgentBorderLabels(bool),
     InstallRecommendedIntegrations,
+    ProviderCreate {
+        name: String,
+        base_url: String,
+        api_key: String,
+    },
+    ProviderUpdate(crate::api::schema::ProviderUpdateParams),
+    ProviderDelete(String),
+    ProviderStartTest(String),
 }
 
 impl App {
@@ -36,12 +47,29 @@ impl App {
                 SettingsAction::InstallRecommendedIntegrations => {
                     self.install_recommended_integrations()
                 }
+                SettingsAction::ProviderCreate {
+                    name,
+                    base_url,
+                    api_key,
+                } => self.provider_create_via_settings(&name, &base_url, &api_key),
+                SettingsAction::ProviderUpdate(params) => self.provider_update_via_settings(params),
+                SettingsAction::ProviderDelete(profile_id) => {
+                    self.provider_delete_via_settings(&profile_id)
+                }
+                SettingsAction::ProviderStartTest(profile_id) => {
+                    self.provider_test_via_settings(&profile_id)
+                }
             }
         }
         if previous_section != SettingsSection::Integrations
             && self.state.settings.section == SettingsSection::Integrations
         {
             self.refresh_integration_recommendations();
+        }
+        if previous_section != SettingsSection::Providers
+            && self.state.settings.section == SettingsSection::Providers
+        {
+            self.refresh_provider_section();
         }
     }
 }
@@ -114,6 +142,7 @@ fn cancel_settings(state: &mut AppState) {
     if let Some(theme_name) = state.settings.original_theme.take() {
         state.theme_name = theme_name;
     }
+    state.settings.providers = None;
     super::modal::leave_modal(state);
 }
 
@@ -138,6 +167,7 @@ fn apply_settings(state: &mut AppState) -> Option<SettingsAction> {
         }
         SettingsSection::Integrations => None,
         _ => {
+            state.settings.providers = None;
             super::modal::leave_modal(state);
             None
         }
@@ -166,7 +196,7 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.list.selected = status_indicator_index(state.status_indicators);
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::Integrations;
+                state.settings.section = SettingsSection::Providers;
                 state.settings.list.selected = 0;
             }
             _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
@@ -279,8 +309,8 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.list.selected = usize::from(!state.agent_border_labels_enabled());
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                state.settings.section = SettingsSection::Theme;
-                state.settings.list.selected = current_theme_index(&state.theme_name);
+                state.settings.section = SettingsSection::Providers;
+                state.settings.list.selected = 0;
             }
             _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
                 Some(super::modal::ModalAction::Apply) => return apply_settings(state),
@@ -288,9 +318,338 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 _ => {}
             },
         },
+        SettingsSection::Providers => {
+            if let Some(action) = update_providers_section(state, key) {
+                return Some(action);
+            }
+        }
     }
 
     None
+}
+
+fn provider_section_mut(state: &mut AppState) -> &mut ProvidersSectionState {
+    state
+        .settings
+        .providers
+        .get_or_insert_with(Default::default)
+}
+
+fn update_providers_section(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+    let profile_count = state
+        .settings
+        .providers
+        .as_ref()
+        .map(|section| section.profiles.len())
+        .unwrap_or(0);
+
+    // Layer 1: single-field editor has exclusive focus.
+    if state
+        .settings
+        .providers
+        .as_ref()
+        .is_some_and(|section| section.edit.is_some())
+    {
+        return provider_edit_key(state, key);
+    }
+
+    // Layer 2: action menu for the selected profile.
+    if state
+        .settings
+        .providers
+        .as_ref()
+        .is_some_and(|section| section.menu.is_some())
+    {
+        return provider_menu_key(state, key);
+    }
+
+    // Layer 3: the profile list itself.
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => state.settings.list.move_prev(),
+        KeyCode::Down | KeyCode::Char('j') => state.settings.list.move_next(profile_count),
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            if profile_count == 0 {
+                start_new_profile_draft(state);
+            } else {
+                provider_section_mut(state).menu = Some(crate::app::state::MenuListState::new(0));
+            }
+        }
+        KeyCode::Char('n') => start_new_profile_draft(state),
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+            state.settings.section = SettingsSection::Integrations;
+            state.settings.list.selected = 0;
+        }
+        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+            state.settings.section = SettingsSection::Theme;
+            state.settings.list.selected = current_theme_index(&state.theme_name);
+        }
+        _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
+            Some(super::modal::ModalAction::Apply) => return apply_settings(state),
+            Some(super::modal::ModalAction::Close) => cancel_settings(state),
+            _ => {}
+        },
+    }
+    None
+}
+
+fn start_new_profile_draft(state: &mut AppState) {
+    let section = provider_section_mut(state);
+    section.menu = None;
+    section.draft = Some(ProviderDraft::default());
+    section.edit = Some(ProviderFieldEdit {
+        profile_id: String::new(),
+        field: ProviderEditField::Name,
+        buffer: String::new(),
+    });
+}
+
+fn provider_menu_key(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+    let selected = state.settings.list.selected;
+    let Some(profile) = state
+        .settings
+        .providers
+        .as_ref()
+        .and_then(|section| section.profiles.get(selected))
+        .cloned()
+    else {
+        provider_section_mut(state).menu = None;
+        return None;
+    };
+    let menu = state
+        .settings
+        .providers
+        .as_mut()
+        .and_then(|section| section.menu.as_mut())?;
+
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => menu.move_prev(),
+        KeyCode::Down | KeyCode::Char('j') => menu.move_next(PROVIDER_MENU_ITEMS.len()),
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let highlighted = menu.highlighted;
+            if let Some(section) = state.settings.providers.as_mut() {
+                section.menu = None;
+            }
+            match highlighted {
+                0 => begin_provider_edit(state, &profile, ProviderEditField::Name),
+                1 => begin_provider_edit(state, &profile, ProviderEditField::BaseUrl),
+                2 => begin_provider_edit(state, &profile, ProviderEditField::ApiKey),
+                3 => begin_provider_edit(state, &profile, ProviderEditField::Note),
+                4 => {
+                    let next = match profile.protocol {
+                        crate::api::schema::ProviderProtocol::OpenaiCompat => {
+                            crate::api::schema::ProviderProtocol::Anthropic
+                        }
+                        crate::api::schema::ProviderProtocol::Anthropic => {
+                            crate::api::schema::ProviderProtocol::Gemini
+                        }
+                        crate::api::schema::ProviderProtocol::Gemini => {
+                            crate::api::schema::ProviderProtocol::OpenaiCompat
+                        }
+                    };
+                    return Some(SettingsAction::ProviderUpdate(
+                        crate::api::schema::ProviderUpdateParams {
+                            profile_id: profile.id.clone(),
+                            protocol: Some(next),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                5 => return Some(SettingsAction::ProviderStartTest(profile.id.clone())),
+                6 => {
+                    return Some(SettingsAction::ProviderUpdate(
+                        crate::api::schema::ProviderUpdateParams {
+                            profile_id: profile.id.clone(),
+                            is_disabled: Some(!profile.is_disabled),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                7 => return Some(SettingsAction::ProviderDelete(profile.id.clone())),
+                _ => start_new_profile_draft(state),
+            }
+        }
+        KeyCode::Esc => {
+            if let Some(section) = state.settings.providers.as_mut() {
+                section.menu = None;
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn begin_provider_edit(
+    state: &mut AppState,
+    profile: &crate::api::schema::ProviderProfileInfo,
+    field: ProviderEditField,
+) {
+    let buffer = match field {
+        ProviderEditField::Name => profile.name.clone(),
+        ProviderEditField::BaseUrl => profile.base_url.clone(),
+        // The stored key is secret: prefill empty and keep the old key when
+        // the edit is saved with an empty buffer ("leave blank = keep").
+        ProviderEditField::ApiKey => String::new(),
+        ProviderEditField::Note => profile.note.clone().unwrap_or_default(),
+    };
+    let section = provider_section_mut(state);
+    section.edit = Some(ProviderFieldEdit {
+        profile_id: profile.id.clone(),
+        field,
+        buffer,
+    });
+}
+
+fn provider_edit_key(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+    let is_editing = state
+        .settings
+        .providers
+        .as_ref()
+        .is_some_and(|section| section.edit.is_some());
+    if !is_editing {
+        return None;
+    }
+
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+    match key.code {
+        KeyCode::Char('u') if ctrl => {
+            if let Some(edit) = edit_mut(state) {
+                edit.buffer.clear();
+            }
+        }
+        KeyCode::Char('w') | KeyCode::Char('h') if ctrl => {
+            if let Some(edit) = edit_mut(state) {
+                while edit.buffer.ends_with(|ch: char| ch.is_whitespace()) {
+                    edit.buffer.pop();
+                }
+                while let Some(last) = edit.buffer.chars().last() {
+                    if last.is_whitespace() {
+                        break;
+                    }
+                    edit.buffer.pop();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(edit) = edit_mut(state) {
+                edit.buffer.pop();
+            }
+        }
+        KeyCode::Enter => return confirm_provider_edit(state),
+        KeyCode::Esc => {
+            if let Some(section) = state.settings.providers.as_mut() {
+                section.edit = None;
+                section.draft = None;
+            }
+        }
+        KeyCode::Char(ch) if !ctrl => {
+            if let Some(edit) = edit_mut(state) {
+                edit.buffer.push(ch);
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn edit_mut(state: &mut AppState) -> Option<&mut ProviderFieldEdit> {
+    state
+        .settings
+        .providers
+        .as_mut()
+        .and_then(|section| section.edit.as_mut())
+}
+
+fn confirm_provider_edit(state: &mut AppState) -> Option<SettingsAction> {
+    let section = state.settings.providers.as_mut()?;
+    let edit = section.edit.take()?;
+
+    // Draft flow: name → base URL → key, then a single create action.
+    if edit.profile_id.is_empty() {
+        let mut draft = section.draft.take().unwrap_or_default();
+        match edit.field {
+            ProviderEditField::Name => {
+                draft.name = edit.buffer.trim().to_string();
+                section.draft = Some(draft);
+                section.edit = Some(ProviderFieldEdit {
+                    profile_id: String::new(),
+                    field: ProviderEditField::BaseUrl,
+                    buffer: String::new(),
+                });
+            }
+            ProviderEditField::BaseUrl => {
+                draft.base_url = edit.buffer.trim().to_string();
+                section.draft = Some(draft);
+                section.edit = Some(ProviderFieldEdit {
+                    profile_id: String::new(),
+                    field: ProviderEditField::ApiKey,
+                    buffer: String::new(),
+                });
+            }
+            // Final stage: create the profile (protocol defaults to
+            // openai-compat; switchable from the action menu afterwards).
+            _ => {
+                section.draft = None;
+                if draft.name.is_empty() || draft.base_url.is_empty() {
+                    return None;
+                }
+                return Some(SettingsAction::ProviderCreate {
+                    name: draft.name,
+                    base_url: draft.base_url,
+                    api_key: edit.buffer,
+                });
+            }
+        }
+        return None;
+    }
+
+    let profile_id = edit.profile_id.clone();
+    match edit.field {
+        ProviderEditField::Name => {
+            let name = edit.buffer.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            Some(SettingsAction::ProviderUpdate(
+                crate::api::schema::ProviderUpdateParams {
+                    profile_id,
+                    name: Some(name),
+                    ..Default::default()
+                },
+            ))
+        }
+        ProviderEditField::BaseUrl => {
+            let base_url = edit.buffer.trim().to_string();
+            if base_url.is_empty() {
+                return None;
+            }
+            Some(SettingsAction::ProviderUpdate(
+                crate::api::schema::ProviderUpdateParams {
+                    profile_id,
+                    base_url: Some(base_url),
+                    ..Default::default()
+                },
+            ))
+        }
+        // Empty buffer = keep the current key.
+        ProviderEditField::ApiKey if edit.buffer.is_empty() => None,
+        ProviderEditField::ApiKey => Some(SettingsAction::ProviderUpdate(
+            crate::api::schema::ProviderUpdateParams {
+                profile_id,
+                api_key: Some(edit.buffer),
+                ..Default::default()
+            },
+        )),
+        ProviderEditField::Note => Some(SettingsAction::ProviderUpdate(
+            crate::api::schema::ProviderUpdateParams {
+                profile_id,
+                note: Some(edit.buffer.trim().to_string()),
+                ..Default::default()
+            },
+        )),
+    }
 }
 
 pub(crate) fn open_settings(state: &mut AppState) {
@@ -309,6 +668,7 @@ pub(crate) fn open_settings_at(state: &mut AppState, section: SettingsSection) {
         SettingsSection::Toast => toast_delivery_index(state.toast_delivery()),
         SettingsSection::PaneLabels => usize::from(!state.agent_border_labels_enabled()),
         SettingsSection::Integrations => 0,
+        SettingsSection::Providers => 0,
     };
     state.mode = Mode::Settings;
 }
@@ -403,6 +763,22 @@ impl AppState {
                 }
             }
             SettingsSection::Integrations => None,
+            SettingsSection::Providers => {
+                let profile_count = self
+                    .settings
+                    .providers
+                    .as_ref()
+                    .map(|section| section.profiles.len())
+                    .unwrap_or(0);
+                let max_visible = area.height as usize;
+                let scroll = if self.settings.list.selected >= max_visible {
+                    self.settings.list.selected - max_visible + 1
+                } else {
+                    0
+                };
+                let idx = scroll + (row - area.y) as usize;
+                (idx < profile_count).then_some(idx)
+            }
         }
     }
 
@@ -422,6 +798,7 @@ impl AppState {
                             usize::from(!self.agent_border_labels_enabled())
                         }
                         SettingsSection::Integrations => 0,
+                        SettingsSection::Providers => 0,
                     });
                     return None;
                 }
@@ -447,6 +824,9 @@ impl AppState {
                             let enabled = idx == 0;
                             Some(SettingsAction::SaveAgentBorderLabels(enabled))
                         }
+                        // Selecting a provider row only moves the cursor;
+                        // actions go through Enter → menu.
+                        SettingsSection::Providers => None,
                         SettingsSection::Integrations => None,
                     };
                 }
@@ -569,19 +949,25 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
         );
+        assert_eq!(state.settings.section, SettingsSection::Providers);
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
         assert_eq!(state.settings.section, SettingsSection::Theme);
 
         update_settings_state(
             &mut state,
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
         );
-        assert_eq!(state.settings.section, SettingsSection::Integrations);
+        assert_eq!(state.settings.section, SettingsSection::Providers);
 
         update_settings_state(
             &mut state,
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
         );
-        assert_eq!(state.settings.section, SettingsSection::PaneLabels);
+        assert_eq!(state.settings.section, SettingsSection::Integrations);
     }
 
     #[test]

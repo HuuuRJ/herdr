@@ -8,9 +8,11 @@ mod layouts;
 mod pane_graphics;
 mod panes;
 pub(crate) mod plugins;
+mod providers;
 mod responses;
 mod session;
 mod tabs;
+mod workflows;
 mod workspaces;
 mod worktrees;
 
@@ -207,7 +209,22 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::ProviderHttpFinished(outcome) = ev {
+            self.handle_provider_http_finished(*outcome);
+            return Vec::new();
+        }
+
+        if let AppEvent::WorkflowNodeFinished(event) = ev {
+            self.handle_workflow_node_finished(event);
+            return Vec::new();
+        }
+
         if let AppEvent::PaneDied { pane_id } = &ev {
+            // Workflow node panes are consumed by the engine before the
+            // regular pane-death bookkeeping tears the pane down.
+            if self.handle_workflow_pane_died(*pane_id) {
+                return Vec::new();
+            }
             if self
                 .state
                 .popup_pane
@@ -1200,6 +1217,48 @@ impl App {
             }
             Method::PluginPaneClose(params) => {
                 return self.handle_plugin_pane_close(request.id, params);
+            }
+            Method::ProviderList(params) => {
+                return self.handle_provider_list(request.id, params);
+            }
+            Method::ProviderGet(params) => {
+                return self.handle_provider_get(request.id, params);
+            }
+            Method::ProviderCreate(params) => {
+                return self.handle_provider_create(request.id, params);
+            }
+            Method::ProviderUpdate(params) => {
+                return self.handle_provider_update(request.id, params);
+            }
+            Method::ProviderDelete(params) => {
+                return self.handle_provider_delete(request.id, params);
+            }
+            Method::ProviderPresets(params) => {
+                return self.handle_provider_presets(request.id, params);
+            }
+            Method::ProviderReveal(params) => {
+                return self.handle_provider_reveal(request.id, params);
+            }
+            Method::WorkflowRun(params) => {
+                return self.handle_workflow_run(request.id, params);
+            }
+            Method::WorkflowList(params) => {
+                return self.handle_workflow_list(request.id, params);
+            }
+            Method::WorkflowGet(params) => {
+                return self.handle_workflow_get(request.id, params);
+            }
+            Method::WorkflowPause(params) => {
+                return self.handle_workflow_pause(request.id, params);
+            }
+            Method::WorkflowResume(params) => {
+                return self.handle_workflow_resume(request.id, params);
+            }
+            Method::WorkflowCancel(params) => {
+                return self.handle_workflow_cancel(request.id, params);
+            }
+            Method::WorkflowDelete(params) => {
+                return self.handle_workflow_delete(request.id, params);
             }
             _ => {
                 return responses::encode_error(

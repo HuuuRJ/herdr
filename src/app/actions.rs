@@ -2956,6 +2956,10 @@ impl AppState {
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
+            // Handled in the api.rs internal-event pump before this point;
+            // listed here only to keep the match exhaustive.
+            AppEvent::ProviderHttpFinished(_) => Vec::new(),
+            AppEvent::WorkflowNodeFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
         }

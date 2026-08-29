@@ -472,6 +472,38 @@ in pane or agent APIs. Native non-terminal plugin panes are outside plugin v1.
 
 `--env KEY=VALUE` can be repeated on process-launching commands. It applies to the newly launched process only. Herdr-managed variables such as `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ENV`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID`, `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_ENTRYPOINT_ID`, and `HERDR_PLUGIN_CONTEXT_JSON` stay authoritative when they conflict with caller-provided env.
 
+## Providers
+
+Provider profiles bind a model, key, and endpoint for workflow nodes:
+
+```bash
+herdr provider list
+herdr provider presets
+herdr provider get <profile_id>
+herdr provider create --name NAME --protocol openai-compat|anthropic|gemini --base-url URL [--preset PRESET_ID] [--key KEY] [--model MODEL_ID]... [--note TEXT]
+herdr provider update <profile_id> [--name NAME] [--protocol ...] [--base-url URL] [--key KEY] [--weight N] [--disable|--enable] [--note TEXT]
+herdr provider delete <profile_id>
+herdr provider test <profile_id>
+herdr provider models <profile_id>
+herdr provider reveal <profile_id>
+```
+
+`provider list` always masks keys; `provider reveal` returns the stored plaintext. Omit `--key` on `provider update` to keep the current key. `provider test` dials the provider once with a minimal request and reports HTTP status, latency, and a classified error. `provider models` fetches and merges the model list into the profile. Profiles are stored per user (not per session) and can also be managed from the settings tab.
+## Workflows
+
+Run and control `.aflow.json` workflow DAGs:
+
+```bash
+herdr workflow run <path.aflow.json>
+herdr workflow list
+herdr workflow get <run_id>
+herdr workflow pause <run_id>
+herdr workflow resume <run_id>
+herdr workflow cancel <run_id>
+herdr workflow delete <run_id>
+```
+
+`workflow run` validates the file, creates a run workspace, and dispatches agent nodes as visible tabs (or background processes with `"visible": false`). `workflow pause` finishes running nodes but dispatches nothing new; `workflow resume` re-reads the file and re-runs only nodes whose config or upstream outputs changed. `workflow cancel` kills running nodes and keeps the cache. Node prompts reference upstream outputs with `{{node_id.output}}`; each agent node binds its own provider profile (model, key, endpoint).
 ## Read sources
 
 | Source | Meaning |

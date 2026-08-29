@@ -268,6 +268,42 @@ pub enum ResponseResult {
         status: crate::config::ConfigReloadStatus,
         diagnostics: Vec<String>,
     },
+    ProviderList {
+        profiles: Vec<super::providers::ProviderProfileInfo>,
+    },
+    ProviderGet {
+        profile: super::providers::ProviderProfileInfo,
+    },
+    ProviderPresets {
+        presets: Vec<super::providers::ProviderPresetInfo>,
+    },
+    ProviderCreated {
+        profile: super::providers::ProviderProfileInfo,
+    },
+    ProviderUpdated {
+        profile: super::providers::ProviderProfileInfo,
+    },
+    ProviderDeleted {},
+    ProviderReveal {
+        api_key: String,
+    },
+    ProviderTest {
+        result: super::providers::ProviderTestResult,
+    },
+    ProviderModelsFetched {
+        result: super::providers::ProviderModelsFetchResult,
+    },
+    WorkflowStarted {
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+    },
+    WorkflowList {
+        runs: Vec<super::workflows::WorkflowRunInfo>,
+    },
+    WorkflowRun {
+        run: super::workflows::WorkflowRunInfo,
+    },
     Ok {},
 }
 

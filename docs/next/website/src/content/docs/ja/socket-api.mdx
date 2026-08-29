@@ -106,6 +106,8 @@ herdr pane read w1:p2 --source recent --lines 50
 | イベント | `events.subscribe`、`events.wait` |
 | インテグレーション | `integration.install`、`integration.uninstall` |
 | プラグイン | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
+| プロバイダー | `provider.list`、`provider.get`、`provider.create`、`provider.update`、`provider.delete`、`provider.presets`、`provider.test`、`provider.models.fetch`、`provider.reveal` |
+| ワークフロー | `workflow.run`、`workflow.list`、`workflow.get`、`workflow.pause`、`workflow.resume`、`workflow.cancel`、`workflow.delete` |
 
 `agent.wait` はサーバー所有でイベント駆動です。解決したペイン占有者に固定されるため、置換されたエージェントが待機を満たすことはありません。`agent.prompt` は `until` と `timeout_ms` を持つ省略可能な `wait` オブジェクトを受け付けます。これにより、プロンプト送信と待機開始を 1 つのリクエストで行い、別々の呼び出し間の競合を避けられます。解決したエージェントがすでに `blocked` の場合、`agent.prompt` は入力を送信せず、待機も開始せずに `agent_blocked` を返します。
 
@@ -480,6 +482,22 @@ v1 には Herdr が管理するプラグインストレージ API はありま�
 ```
 
 `plugin.pane.open` は、インストール済みで有効かつプラットフォーム互換のプラグインを要求し、要求されたマニフェストの `[[panes]]` エントリーポイントを argv ベースのターミナルペインとして起動します。マニフェストのペイン `placement` のデフォルトは `overlay` です。リクエストの `placement` は `overlay`、`popup`、`split`、`tab`、`zoomed` でマニフェストを上書きできます。overlay と popup はアクティブなタイルペインを起動コンテキストとして使います。ポップアップターミナルはセッションモーダルで、タブレイアウトを変更しません。任意の `width` と `height` は、外側のサイズをターミナルセル数または `"80%"` のような割合で指定します。省略した寸法はデフォルトでターミナルの半分になり、小さすぎる値は最小サイズに制限されます。ポップアップはペイン id を持たず、`pane.*` とエージェント API の対象外で、ペインのライフサイクルイベントを発行せず、プラグインのフォーカスコンテキストを背後のタイルペインに維持し、そのプロセスへ `HERDR_PANE_ID` を渡しません。起動は `ok` を返し、`popup.close` はアクティブなポップアップを閉じ、ポップアップがない場合は `popup_not_open` を返します。split と zoomed は既存のペインを対象とし、tab はワークスペースを対象にできます。split、tab、zoomed、overlay は通常の Herdr ペインとして振る舞い、`plugin.pane.focus` と `plugin.pane.close` は引き続きそれらのペインに作用します。
+
+## プロバイダープロファイル
+
+プロバイダープロファイルは、ワークフローノードで「どのモデルを、どのキーで、どのエンドポイントに対して使うか」を束ねます。プロファイルは `{protocol, base_url, api_key, models}` で構成され、同一ベンダーでもキーごとに複数のプロファイルを持てます。`protocol` はワイモ形式（`openai-compat`、`anthropic`、`gemini`）を区別します。ベース URL はルート（例: `/v1`）まで指定し、エンドポイントはサーバー側で付加されます。
+
+プロファイルはユーザー共通の `providers.json`（0600）に保存され、セッション間で共有されます。API レスポンスのキーは常にマスクされ（`sk-***cdef`）、平文を返すのは `provider.reveal` だけです。更新は省略時解釈が「保持」です - `api_key` を省略すると保存済みキーがそのまま使われます。
+
+`provider.test` は 1 トークンの最小チャットリクエスト（表示モデルがない場合は models エンドポイントの探索にフォールバック）を送り、失敗を分類します: 401/403 は認証、404 はエンドポイント、429 はレート制限。`provider.models.fetch` はモデル一覧を取得してプロファイルにマージします（手動エントリは保持、可視性は id 単位で継承、上限 500）。どちらもバックグラウンドの curl サブプロセス（10～15 秒タイムアウト）で非同期に実行され、API キーが curl のコマンドラインに現れることはありません。
+
+## ワークフロー
+
+ワークフローは `.aflow.json` ファイルです: `after` 依存エッジを持つ名前付きノードリスト。`workflow.run {path}` はファイルを解析・検証し、専用ワークスペースを作成して DAG をスケジュールします。ノードタイプ: `agent`（claude-code / codex / custom ランタイム、ノードごとにプロバイダープロファイルをバインド）、`prompt_template`（純粋なテキストレンダリング）、`image_gen`（バインドされたプロファイル経由の OpenAI 互換 images エンドポイント）。
+
+可視エージェントノードは run ワークスペース内のラベル付きタブとして実行されます。プラットフォームシェルラッパーは出力を run ディレクトリにミラーし、`HERDR_EXIT:<code>` センチネルを追記するため、終了コードと出力はペーン破棄後も残ります。不可視ノード（`"visible": false`）はバックグラウンドプロセスとして実行されます。
+
+`workflow.pause` はソフトストップです: 実行中のノードは完了し、新しいノードは配信されません。`workflow.resume` はワークフローファイルを再読み込みし、コンテンツハッシュキャッシュにより変更されていないノードをスキップします — 一時停止中にファイルを編集（ノードの追加・削除・変更）して resume すると、影響を受けたノードのみ再実行されます。`workflow.cancel` は実行中のノードを強制終了しキャッシュを保持します。run はステートディレクトリ（`workflows/runs/<run_id>/`）に永続化され、最新の `workflow.keep_runs` 件が保持されます。`workflow.max_concurrent_agents` は全 run を通じた同時実行エージェントノード数の上限です。カスタムコマンドはプラットフォームシェル（Unix は POSIX sh、Windows は PowerShell 5.1 — `&&` は使えないため `;` を使用）で実行されます。
 
 ## ソケットトランスポート
 

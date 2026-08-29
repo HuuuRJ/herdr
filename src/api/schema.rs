@@ -6,10 +6,12 @@ pub mod events;
 pub mod integrations;
 pub mod panes;
 pub mod plugins;
+pub mod providers;
 pub mod response;
 pub mod server;
 pub mod session;
 pub mod tabs;
+pub mod workflows;
 pub mod workspaces;
 pub mod worktrees;
 
@@ -19,10 +21,12 @@ pub use events::*;
 pub use integrations::*;
 pub use panes::*;
 pub use plugins::*;
+pub use providers::*;
 pub use response::*;
 pub use server::*;
 pub use session::*;
 pub use tabs::*;
+pub use workflows::*;
 pub use workspaces::*;
 pub use worktrees::*;
 
@@ -240,6 +244,38 @@ pub enum Method {
     PluginPaneFocus(PluginPaneFocusParams),
     #[serde(rename = "plugin.pane.close")]
     PluginPaneClose(PluginPaneCloseParams),
+    #[serde(rename = "provider.list")]
+    ProviderList(ProviderListParams),
+    #[serde(rename = "provider.get")]
+    ProviderGet(ProviderGetParams),
+    #[serde(rename = "provider.create")]
+    ProviderCreate(ProviderCreateParams),
+    #[serde(rename = "provider.update")]
+    ProviderUpdate(ProviderUpdateParams),
+    #[serde(rename = "provider.delete")]
+    ProviderDelete(ProviderDeleteParams),
+    #[serde(rename = "provider.presets")]
+    ProviderPresets(ProviderPresetsParams),
+    #[serde(rename = "provider.test")]
+    ProviderTest(ProviderTestParams),
+    #[serde(rename = "provider.models.fetch")]
+    ProviderModelsFetch(ProviderModelsFetchParams),
+    #[serde(rename = "provider.reveal")]
+    ProviderReveal(ProviderRevealParams),
+    #[serde(rename = "workflow.run")]
+    WorkflowRun(WorkflowRunParams),
+    #[serde(rename = "workflow.list")]
+    WorkflowList(WorkflowListParams),
+    #[serde(rename = "workflow.get")]
+    WorkflowGet(WorkflowGetParams),
+    #[serde(rename = "workflow.pause")]
+    WorkflowPause(WorkflowPauseParams),
+    #[serde(rename = "workflow.resume")]
+    WorkflowResume(WorkflowResumeParams),
+    #[serde(rename = "workflow.cancel")]
+    WorkflowCancel(WorkflowCancelParams),
+    #[serde(rename = "workflow.delete")]
+    WorkflowDelete(WorkflowDeleteParams),
 }
 
 #[cfg(test)]

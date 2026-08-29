@@ -3754,6 +3754,15 @@ impl HeadlessServer {
                 .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
         }
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::ProviderTest(_) | api::schema::Method::ProviderModelsFetch(_)
+        ) {
+            let deferred_changed = self
+                .app
+                .handle_deferred_provider_api_request(msg.request, msg.respond_to);
+            return changed | deferred_changed;
+        }
         let mut response = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
@@ -4723,6 +4732,8 @@ impl HeadlessServer {
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
+
+        changed |= self.app.tick_workflow_timeouts(now);
 
         if self
             .app

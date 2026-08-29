@@ -28,6 +28,7 @@ mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
 mod window_title;
+mod workflow;
 mod worktrees;
 
 use std::collections::{HashMap, HashSet};
@@ -126,6 +127,11 @@ pub struct App {
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
     pub(crate) next_api_worktree_operation_id: u64,
+    pub(crate) workflow_runs: HashMap<String, crate::app::workflow::WorkflowRunLive>,
+    pub(crate) workflow_limits: crate::config::WorkflowConfig,
+    pub(crate) pending_provider_requests: HashMap<String, u64>,
+    pub(crate) next_provider_operation_id: u64,
+    pub(crate) provider_http_in_flight: usize,
     pub(crate) last_sidebar_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) pending_url_click_sources: HashSet<InputSourceId>,
@@ -701,6 +707,7 @@ impl App {
                 list: state::SelectionListState::new(0),
                 original_palette: None,
                 original_theme: None,
+                providers: None,
             },
             integration_recommendations: crate::integration::integration_recommendations(),
             agent_manifest_summaries,
@@ -778,6 +785,11 @@ impl App {
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),
             next_api_worktree_operation_id: 1,
+            workflow_runs: HashMap::new(),
+            workflow_limits: config.workflow,
+            pending_provider_requests: HashMap::new(),
+            next_provider_operation_id: 1,
+            provider_http_in_flight: 0,
             last_sidebar_divider_click: None,
             last_pane_click: None,
             pending_url_click_sources: HashSet::new(),
@@ -1445,6 +1457,10 @@ impl App {
         let mut diagnostics = load_diagnostics.to_vec();
         let invalid_section =
             |section: &str| invalid_sections.iter().any(|invalid| invalid == section);
+
+        if !invalid_section("workflow") {
+            self.workflow_limits = config.workflow;
+        }
 
         if !invalid_section("keys") {
             match config.live_keybinds_with_diagnostics() {

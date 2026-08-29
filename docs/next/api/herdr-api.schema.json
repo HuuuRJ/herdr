@@ -3631,6 +3631,208 @@
             }
           ]
         },
+        "ProviderCreateParams": {
+          "properties": {
+            "api_key": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "models": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/request/$defs/ProviderModelEntry"
+              },
+              "type": "array"
+            },
+            "name": {
+              "type": "string"
+            },
+            "note": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "preset_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "protocol": {
+              "$ref": "#/schemas/request/$defs/ProviderProtocol"
+            }
+          },
+          "required": [
+            "name",
+            "protocol",
+            "base_url"
+          ],
+          "type": "object"
+        },
+        "ProviderDeleteParams": {
+          "properties": {
+            "profile_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile_id"
+          ],
+          "type": "object"
+        },
+        "ProviderGetParams": {
+          "properties": {
+            "profile_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile_id"
+          ],
+          "type": "object"
+        },
+        "ProviderListParams": {
+          "type": "object"
+        },
+        "ProviderModelEntry": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/schemas/request/$defs/ProviderModelSource"
+            },
+            "visible": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "source"
+          ],
+          "type": "object"
+        },
+        "ProviderModelSource": {
+          "enum": [
+            "fetched",
+            "manual"
+          ],
+          "type": "string"
+        },
+        "ProviderModelsFetchParams": {
+          "properties": {
+            "profile_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile_id"
+          ],
+          "type": "object"
+        },
+        "ProviderPresetsParams": {
+          "type": "object"
+        },
+        "ProviderProtocol": {
+          "enum": [
+            "openai-compat",
+            "anthropic",
+            "gemini"
+          ],
+          "type": "string"
+        },
+        "ProviderRevealParams": {
+          "properties": {
+            "profile_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile_id"
+          ],
+          "type": "object"
+        },
+        "ProviderTestParams": {
+          "properties": {
+            "profile_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile_id"
+          ],
+          "type": "object"
+        },
+        "ProviderUpdateParams": {
+          "description": "Field updates are `None` = keep current value; `Some` = replace. An empty\n`Some(\"\")` for `api_key` is rejected — clearing a key is not an edit.",
+          "properties": {
+            "api_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "is_disabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "profile_id": {
+              "type": "string"
+            },
+            "protocol": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/ProviderProtocol"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "weight": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "profile_id"
+          ],
+          "type": "object"
+        },
         "ReadFormat": {
           "enum": [
             "text",
@@ -4144,6 +4346,76 @@
             "bottom-right"
           ],
           "type": "string"
+        },
+        "WorkflowCancelParams": {
+          "properties": {
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id"
+          ],
+          "type": "object"
+        },
+        "WorkflowDeleteParams": {
+          "properties": {
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id"
+          ],
+          "type": "object"
+        },
+        "WorkflowGetParams": {
+          "properties": {
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id"
+          ],
+          "type": "object"
+        },
+        "WorkflowListParams": {
+          "type": "object"
+        },
+        "WorkflowPauseParams": {
+          "properties": {
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id"
+          ],
+          "type": "object"
+        },
+        "WorkflowResumeParams": {
+          "properties": {
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id"
+          ],
+          "type": "object"
+        },
+        "WorkflowRunParams": {
+          "properties": {
+            "path": {
+              "description": "Path to the `.aflow.json` file.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
         },
         "WorkspaceCloseParams": {
           "properties": {
@@ -5901,6 +6173,262 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PluginPaneCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderGetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.update",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderUpdateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.delete",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderDeleteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.presets",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderPresetsParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.test",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderTestParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.models.fetch",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderModelsFetchParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "provider.reveal",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProviderRevealParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workflow.run",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkflowRunParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workflow.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkflowListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workflow.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkflowGetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workflow.pause",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkflowPauseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workflow.resume",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkflowResumeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workflow.cancel",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkflowCancelParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workflow.delete",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkflowDeleteParams"
             }
           },
           "required": [
@@ -8631,6 +9159,213 @@
             }
           ]
         },
+        "ProviderModelEntry": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/ProviderModelSource"
+            },
+            "visible": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "source"
+          ],
+          "type": "object"
+        },
+        "ProviderModelSource": {
+          "enum": [
+            "fetched",
+            "manual"
+          ],
+          "type": "string"
+        },
+        "ProviderModelsFetchResult": {
+          "description": "Result of a model list fetch, after merge into the profile.",
+          "properties": {
+            "models": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ProviderModelEntry"
+              },
+              "type": "array"
+            },
+            "truncated": {
+              "default": false,
+              "type": "boolean"
+            },
+            "warning": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "models"
+          ],
+          "type": "object"
+        },
+        "ProviderPresetCategory": {
+          "oneOf": [
+            {
+              "enum": [
+                "official",
+                "cn-official"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "custom",
+              "description": "Synthetic category for the always-present \"custom relay\" pseudo\npreset appended to provider.presets responses.",
+              "type": "string"
+            }
+          ]
+        },
+        "ProviderPresetInfo": {
+          "properties": {
+            "base_url": {
+              "type": "string"
+            },
+            "category": {
+              "$ref": "#/schemas/success_response/$defs/ProviderPresetCategory"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "protocol": {
+              "$ref": "#/schemas/success_response/$defs/ProviderProtocol"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "category",
+            "protocol",
+            "base_url"
+          ],
+          "type": "object"
+        },
+        "ProviderProfileInfo": {
+          "description": "Masked profile shape returned by list/get.",
+          "properties": {
+            "api_key_masked": {
+              "type": "string"
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "created_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "has_api_key": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "is_disabled": {
+              "type": "boolean"
+            },
+            "models": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ProviderModelEntry"
+              },
+              "type": "array"
+            },
+            "name": {
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "preset_id": {
+              "type": "string"
+            },
+            "protocol": {
+              "$ref": "#/schemas/success_response/$defs/ProviderProtocol"
+            },
+            "weight": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "preset_id",
+            "protocol",
+            "base_url",
+            "api_key_masked",
+            "has_api_key",
+            "weight",
+            "is_disabled",
+            "created_unix"
+          ],
+          "type": "object"
+        },
+        "ProviderProtocol": {
+          "enum": [
+            "openai-compat",
+            "anthropic",
+            "gemini"
+          ],
+          "type": "string"
+        },
+        "ProviderTestResult": {
+          "description": "Result of a one-shot connectivity test (display-only).",
+          "properties": {
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "http_status": {
+              "description": "HTTP status when the server answered, `None` on transport failure.",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "latency_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok",
+            "latency_ms"
+          ],
+          "type": "object"
+        },
         "ReadFormat": {
           "enum": [
             "text",
@@ -9810,6 +10545,209 @@
             },
             {
               "properties": {
+                "profiles": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ProviderProfileInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "provider_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "profiles"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "profile": {
+                  "$ref": "#/schemas/success_response/$defs/ProviderProfileInfo"
+                },
+                "type": {
+                  "const": "provider_get",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "profile"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "presets": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ProviderPresetInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "provider_presets",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "presets"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "profile": {
+                  "$ref": "#/schemas/success_response/$defs/ProviderProfileInfo"
+                },
+                "type": {
+                  "const": "provider_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "profile"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "profile": {
+                  "$ref": "#/schemas/success_response/$defs/ProviderProfileInfo"
+                },
+                "type": {
+                  "const": "provider_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "profile"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "provider_deleted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "api_key": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "provider_reveal",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "api_key"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "result": {
+                  "$ref": "#/schemas/success_response/$defs/ProviderTestResult"
+                },
+                "type": {
+                  "const": "provider_test",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "result"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "result": {
+                  "$ref": "#/schemas/success_response/$defs/ProviderModelsFetchResult"
+                },
+                "type": {
+                  "const": "provider_models_fetched",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "result"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "workflow_started",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "run_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "runs": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/WorkflowRunInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "workflow_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "runs"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "run": {
+                  "$ref": "#/schemas/success_response/$defs/WorkflowRunInfo"
+                },
+                "type": {
+                  "const": "workflow_run",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "ok",
                   "type": "string"
@@ -9950,6 +10888,83 @@
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "WorkflowNodeInfo": {
+          "properties": {
+            "cached": {
+              "default": false,
+              "type": "boolean"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "phase": {
+              "description": "pending | running | done | error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "phase"
+          ],
+          "type": "object"
+        },
+        "WorkflowRunInfo": {
+          "properties": {
+            "finished_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "nodes": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/WorkflowNodeInfo"
+              },
+              "type": "array"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "started_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "description": "running | paused | cancelled | done | error",
+              "type": "string"
+            },
+            "workflow_name": {
+              "type": "string"
+            },
+            "workflow_path": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "run_id",
+            "workflow_name",
+            "workflow_path",
+            "status",
+            "started_unix",
+            "nodes"
           ],
           "type": "object"
         },

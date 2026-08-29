@@ -415,6 +415,20 @@ impl App {
                         SettingsAction::InstallRecommendedIntegrations => {
                             self.install_recommended_integrations()
                         }
+                        SettingsAction::ProviderCreate {
+                            name,
+                            base_url,
+                            api_key,
+                        } => self.provider_create_via_settings(&name, &base_url, &api_key),
+                        SettingsAction::ProviderUpdate(params) => {
+                            self.provider_update_via_settings(params)
+                        }
+                        SettingsAction::ProviderDelete(profile_id) => {
+                            self.provider_delete_via_settings(&profile_id)
+                        }
+                        SettingsAction::ProviderStartTest(profile_id) => {
+                            self.provider_test_via_settings(&profile_id)
+                        }
                     },
                     MouseAction::FocusWorkspace { ws_idx } => {
                         self.focus_workspace_idx_via_api(ws_idx)

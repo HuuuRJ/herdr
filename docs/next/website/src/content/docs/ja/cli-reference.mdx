@@ -422,6 +422,38 @@ herdr plugin pane close <pane_id>
 
 `--env KEY=VALUE` はプロセスを起動するコマンドで繰り返し指定できます。新しく起動されるプロセスにのみ適用されます。`HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ENV`、`HERDR_WORKSPACE_ID`、`HERDR_TAB_ID`、`HERDR_PANE_ID`、`HERDR_PLUGIN_ID`、`HERDR_PLUGIN_ROOT`、`HERDR_PLUGIN_CONFIG_DIR`、`HERDR_PLUGIN_STATE_DIR`、`HERDR_PLUGIN_ENTRYPOINT_ID`、`HERDR_PLUGIN_CONTEXT_JSON` のような Herdr 管理の変数は、呼び出し側が与えた環境変数と衝突した場合も権威を保ちます。
 
+## プロバイダー
+
+プロバイダープロファイルは、ワークフローノード用にモデル・キー・エンドポイントを束ねます:
+
+```bash
+herdr provider list
+herdr provider presets
+herdr provider get <profile_id>
+herdr provider create --name NAME --protocol openai-compat|anthropic|gemini --base-url URL [--preset PRESET_ID] [--key KEY] [--model MODEL_ID]... [--note TEXT]
+herdr provider update <profile_id> [--name NAME] [--protocol ...] [--base-url URL] [--key KEY] [--weight N] [--disable|--enable] [--note TEXT]
+herdr provider delete <profile_id>
+herdr provider test <profile_id>
+herdr provider models <profile_id>
+herdr provider reveal <profile_id>
+```
+
+`provider list` のキーは常にマスク表示され、`provider reveal` が保存済み平文を返します。`provider update` で `--key` を省略すると現在のキーが保持されます。`provider test` は最小リクエストを 1 回送信し、HTTP ステータス・レーテンシ・分類済みエラーを報告します。`provider models` はモデル一覧を取得してプロファイルにマージします。プロファイルはユーザー単位（セッション単位ではない）で保存され、設定タブからも管理できます。
+## ワークフロー
+
+`.aflow.json` ワークフロー DAG の実行と制御:
+
+```bash
+herdr workflow run <path.aflow.json>
+herdr workflow list
+herdr workflow get <run_id>
+herdr workflow pause <run_id>
+herdr workflow resume <run_id>
+herdr workflow cancel <run_id>
+herdr workflow delete <run_id>
+```
+
+`workflow run` はファイルを検証し、run ワークスペースを作成して、エージェントノードを可視タブ（または `"visible": false` でバックグラウンドプロセス）として配信します。`workflow pause` は実行中のノードを完了させつつ新しい配信を停止します。`workflow resume` はファイルを再読み込みし、設定または上流出力が変更されたノードのみ再実行します。`workflow cancel` は実行中のノードを強制終了しキャッシュを保持します。ノードプロンプトは `{{node_id.output}}` で上流出力を参照し、各エージェントノードは独自のプロバイダープロファイル（モデル・キー・エンドポイント）をバインドします。
 ## 読み取りソース
 
 | ソース | 意味 |

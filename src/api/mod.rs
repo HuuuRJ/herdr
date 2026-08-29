@@ -78,6 +78,16 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PluginPaneOpen(_)
             | Method::PluginPaneFocus(_)
             | Method::PluginPaneClose(_)
+            | Method::ProviderCreate(_)
+            | Method::ProviderUpdate(_)
+            | Method::ProviderDelete(_)
+            | Method::ProviderTest(_)
+            | Method::ProviderModelsFetch(_)
+            | Method::WorkflowRun(_)
+            | Method::WorkflowPause(_)
+            | Method::WorkflowResume(_)
+            | Method::WorkflowCancel(_)
+            | Method::WorkflowDelete(_)
     )
 }
 

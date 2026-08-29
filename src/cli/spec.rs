@@ -42,7 +42,9 @@ pub(super) fn command() -> Command {
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
-        .subcommand(plugin_command());
+        .subcommand(plugin_command())
+        .subcommand(provider_command())
+        .subcommand(workflow_command());
     configure_help(command, 0)
 }
 
@@ -1374,4 +1376,129 @@ mod tests {
             assert!(!output.is_empty(), "empty {shell:?} completion output");
         }
     }
+}
+
+fn workflow_command() -> Command {
+    Command::new("workflow")
+        .about("Run and control .aflow.json workflow DAGs")
+        .subcommand(
+            Command::new("run")
+                .about("Start a workflow run from a file")
+                .arg(
+                    Arg::new("path")
+                        .required(true)
+                        .value_hint(ValueHint::FilePath),
+                ),
+        )
+        .subcommand(Command::new("list").about("List workflow runs"))
+        .subcommand(
+            Command::new("get")
+                .about("Show one workflow run")
+                .arg(Arg::new("run_id").required(true)),
+        )
+        .subcommand(
+            Command::new("pause")
+                .about("Pause a running workflow (running nodes finish)")
+                .arg(Arg::new("run_id").required(true)),
+        )
+        .subcommand(
+            Command::new("resume")
+                .about("Resume a paused workflow; unchanged nodes hit the cache")
+                .arg(Arg::new("run_id").required(true)),
+        )
+        .subcommand(
+            Command::new("cancel")
+                .about("Cancel a workflow run (kills running nodes; cache kept)")
+                .arg(Arg::new("run_id").required(true)),
+        )
+        .subcommand(
+            Command::new("delete")
+                .about("Delete a workflow run and its cached outputs")
+                .arg(Arg::new("run_id").required(true)),
+        )
+}
+
+fn provider_command() -> Command {
+    Command::new("provider")
+        .about("Manage provider profiles (model/key/endpoint bindings)")
+        .subcommand(Command::new("list").about("List provider profiles (masked keys)"))
+        .subcommand(Command::new("presets").about("List built-in provider presets"))
+        .subcommand(
+            Command::new("get")
+                .about("Show one provider profile")
+                .arg(Arg::new("profile_id").required(true)),
+        )
+        .subcommand(
+            Command::new("create")
+                .about("Create a provider profile")
+                .arg(Arg::new("name").long("name").required(true).num_args(1))
+                .arg(
+                    Arg::new("protocol")
+                        .long("protocol")
+                        .required(true)
+                        .num_args(1)
+                        .value_parser(["openai-compat", "anthropic", "gemini"]),
+                )
+                .arg(
+                    Arg::new("base_url")
+                        .long("base-url")
+                        .required(true)
+                        .num_args(1),
+                )
+                .arg(Arg::new("preset").long("preset").num_args(1))
+                .arg(Arg::new("key").long("key").num_args(1))
+                .arg(
+                    Arg::new("model")
+                        .long("model")
+                        .num_args(1)
+                        .action(clap::ArgAction::Append),
+                )
+                .arg(Arg::new("note").long("note").num_args(1)),
+        )
+        .subcommand(
+            Command::new("update")
+                .about("Update a provider profile")
+                .arg(Arg::new("profile_id").required(true))
+                .arg(Arg::new("name").long("name").num_args(1))
+                .arg(
+                    Arg::new("protocol")
+                        .long("protocol")
+                        .num_args(1)
+                        .value_parser(["openai-compat", "anthropic", "gemini"]),
+                )
+                .arg(Arg::new("base_url").long("base-url").num_args(1))
+                .arg(Arg::new("key").long("key").num_args(1))
+                .arg(Arg::new("weight").long("weight").num_args(1))
+                .arg(
+                    Arg::new("disable")
+                        .long("disable")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("enable")
+                        .long("enable")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(Arg::new("note").long("note").num_args(1)),
+        )
+        .subcommand(
+            Command::new("delete")
+                .about("Delete a provider profile")
+                .arg(Arg::new("profile_id").required(true)),
+        )
+        .subcommand(
+            Command::new("test")
+                .about("Run a connectivity test against a provider profile")
+                .arg(Arg::new("profile_id").required(true)),
+        )
+        .subcommand(
+            Command::new("models")
+                .about("Fetch and merge the model list for a provider profile")
+                .arg(Arg::new("profile_id").required(true)),
+        )
+        .subcommand(
+            Command::new("reveal")
+                .about("Reveal the stored API key for a provider profile")
+                .arg(Arg::new("profile_id").required(true)),
+        )
 }

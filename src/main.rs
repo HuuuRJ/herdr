@@ -83,6 +83,7 @@ mod plugin_paths;
 mod popup_size;
 mod product_announcements;
 mod protocol;
+mod provider;
 mod pty;
 mod raw_input;
 mod release_notes;
@@ -100,6 +101,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod workflow;
 mod workspace;
 mod worktree;
 

@@ -6,6 +6,7 @@
 
 mod io;
 pub mod plugin_registry;
+pub mod provider_registry;
 mod restore;
 mod snapshot;
 

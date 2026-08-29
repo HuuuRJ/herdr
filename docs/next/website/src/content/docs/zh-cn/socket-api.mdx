@@ -106,6 +106,8 @@ herdr pane read w1:p2 --source recent --lines 50
 | 事件 | `events.subscribe`、`events.wait` |
 | 集成 | `integration.install`、`integration.uninstall` |
 | 插件 | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
+| 供应商 | `provider.list`、`provider.get`、`provider.create`、`provider.update`、`provider.delete`、`provider.presets`、`provider.test`、`provider.models.fetch`、`provider.reveal` |
+| 工作流 | `workflow.run`、`workflow.list`、`workflow.get`、`workflow.pause`、`workflow.resume`、`workflow.cancel`、`workflow.delete` |
 
 `agent.wait` 由服务器拥有并由事件驱动。它会固定到已解析的窗格占用者,因此替换后的智能体不能满足该等待。`agent.prompt` 接受可选的 `wait` 对象,其中包含 `until` 和 `timeout_ms`;这样可在一个请求中提交提示并开始等待,避免两个独立调用之间的竞态。如果解析出的智能体已经是 `blocked`,`agent.prompt` 不会发送输入或开始等待,而是返回 `agent_blocked`。
 
@@ -476,6 +478,22 @@ v1 没有 Herdr 管理的插件存储 API。`HERDR_PLUGIN_CONFIG_DIR` 和 `HERDR
 ```
 
 `plugin.pane.open` 要求已安装、已启用、平台兼容的插件,然后把请求的清单 `[[panes]]` 入口点作为 argv 支撑的终端窗格启动。清单窗格的 `placement` 默认为 `overlay`;请求的 `placement` 可以用 `overlay`、`popup`、`split`、`tab` 或 `zoomed` 覆盖清单。overlay 和 popup 使用活动平铺窗格作为启动上下文。弹窗终端是会话级模态界面,不会改变标签页布局;可选的 `width` 和 `height` 以终端单元格数或 `"80%"` 这样的百分比设置外层尺寸。省略时默认为终端大小的一半,过小的值会限制为弹窗最小尺寸。弹窗没有窗格 id,不属于任何 `pane.*` 或智能体 API,不会发出窗格生命周期事件,会把插件焦点上下文保留在底层平铺窗格上,也不会向其进程导出 `HERDR_PANE_ID`。弹窗启动返回 `ok`;`popup.close` 关闭活动弹窗,没有弹窗时返回 `popup_not_open`。split 和 zoomed 针对已有窗格,tab 可以针对工作区。split、tab、zoomed 和 overlay 打开后表现得像普通 Herdr 窗格,`plugin.pane.focus` 和 `plugin.pane.close` 仍可操作这些窗格。
+
+## 供应商档案
+
+供应商档案为工作流节点绑定“用哪个模型、走哪个 Key、连哪个地址”。档案由 `{protocol, base_url, api_key, models}` 组成；同一供应商可以建多条档案（每个 Key 一条），`protocol` 区分线协议：`openai-compat`、`anthropic`、`gemini`。Base URL 只填到根（例如 `/v1`），端点由服务端拼接。
+
+档案保存在用户全局的 `providers.json`（0600）中，跨会话共享。API 响应中的 Key 始终掩码显示（`sk-***cdef`）；只有 `provider.reveal` 返回明文。更新语义为“省略即保留”——不传 `api_key` 就保留已存 Key。
+
+`provider.test` 发送一次 1 token 的最小对话请求（无可见模型时降级为模型端点探测），并分类失败原因：401/403 视为认证失败、404 视为端点配错、429 视为限流。`provider.models.fetch` 拉取模型列表并合并进档案（手工条目保留、可见性按 id 继承，上限 500 个）。两者都在后台 curl 子进程中执行（10–15 秒超时）并异步应答；API Key 绝不出现在 curl 命令行中。
+
+## 工作流
+
+工作流是一个 `.aflow.json` 文件：带 `after` 依赖边的命名节点列表。`workflow.run {path}` 解析并校验文件、创建专属 workspace、调度 DAG。节点类型：`agent`（claude-code / codex / custom 运行时，按节点绑定供应商档案）、`prompt_template`（纯文本渲染）、`image_gen`（经绑定档案的 OpenAI 兼容 images 端点）。
+
+可见 agent 节点以带标签 tab 的形式运行在 run workspace 里；平台 shell 包装把输出镜像到 run 目录并追加 `HERDR_EXIT:<code>` 哨兵，因此退出码与输出在 pane 拆除后依然可用。不可见节点（`"visible": false`）以后台进程执行。
+
+`workflow.pause` 是软停止：在跑的节点跑完、不派发新节点。`workflow.resume` 重新读取工作流文件并通过内容哈希缓存跳过未变节点——暂停中编辑文件（增删改节点）后 resume，只有受影响的节点重跑。`workflow.cancel` 杀掉在跑节点并保留缓存；`workflow.delete` 删除 run 目录与 workspace。run 持久化在状态目录（`workflows/runs/<run_id>/`），保留最新 `workflow.keep_runs` 个。`workflow.max_concurrent_agents` 限制所有 run 的并发 agent 节点总数。custom 命令经平台 shell 执行：Unix 用 POSIX sh，Windows 用 PowerShell 5.1（不支持 `&&`，请用 `;`）。
 
 ## Socket 传输
 

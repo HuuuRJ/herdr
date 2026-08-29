@@ -87,6 +87,20 @@ impl App {
             self.sync_prefix_input_source(previous_mode);
             return changed | deferred_changed;
         }
+        if matches!(
+            &msg.request.method,
+            crate::api::schema::Method::ProviderTest(_)
+                | crate::api::schema::Method::ProviderModelsFetch(_)
+        ) {
+            self.drain_all_internal_events();
+            let deferred_changed =
+                self.handle_deferred_provider_api_request(msg.request, msg.respond_to);
+            if !skip_default_workspace {
+                changed |= self.ensure_default_workspace();
+            }
+            self.sync_prefix_input_source(previous_mode);
+            return changed | deferred_changed;
+        }
         let response = self.handle_api_request(msg.request);
         if let (Some(params), Some(active)) = (stream_open.as_ref(), stream_active) {
             self.attach_pane_graphics_stream_active(params, active, &response);
@@ -290,6 +304,8 @@ impl App {
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = false;
         let mut resized = false;
+
+        changed |= self.tick_workflow_timeouts(now);
 
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();

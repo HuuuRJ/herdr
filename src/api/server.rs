@@ -477,6 +477,22 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PluginPaneOpen(_) => "plugin.pane.open",
         Method::PluginPaneFocus(_) => "plugin.pane.focus",
         Method::PluginPaneClose(_) => "plugin.pane.close",
+        Method::ProviderList(_) => "provider.list",
+        Method::ProviderGet(_) => "provider.get",
+        Method::ProviderCreate(_) => "provider.create",
+        Method::ProviderUpdate(_) => "provider.update",
+        Method::ProviderDelete(_) => "provider.delete",
+        Method::ProviderPresets(_) => "provider.presets",
+        Method::ProviderTest(_) => "provider.test",
+        Method::ProviderModelsFetch(_) => "provider.models.fetch",
+        Method::ProviderReveal(_) => "provider.reveal",
+        Method::WorkflowRun(_) => "workflow.run",
+        Method::WorkflowList(_) => "workflow.list",
+        Method::WorkflowGet(_) => "workflow.get",
+        Method::WorkflowPause(_) => "workflow.pause",
+        Method::WorkflowResume(_) => "workflow.resume",
+        Method::WorkflowCancel(_) => "workflow.cancel",
+        Method::WorkflowDelete(_) => "workflow.delete",
     }
 }
 

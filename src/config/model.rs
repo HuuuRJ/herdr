@@ -324,6 +324,7 @@ pub struct Config {
     pub keys: KeysConfig,
     pub ui: UiConfig,
     pub worktrees: WorktreesConfig,
+    pub workflow: WorkflowConfig,
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
@@ -837,6 +838,16 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct WorkflowConfig {
+    /// Global cap on concurrently running workflow agent nodes across all
+    /// runs (agent requests cost real money).
+    pub max_concurrent_agents: usize,
+    /// How many finished workflow runs to keep on disk (oldest pruned).
+    pub keep_runs: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TabBarPositionConfig {
@@ -1094,6 +1105,15 @@ impl Default for WorktreesConfig {
     fn default() -> Self {
         Self {
             directory: "~/.herdr/worktrees".into(),
+        }
+    }
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_agents: 3,
+            keep_runs: 20,
         }
     }
 }

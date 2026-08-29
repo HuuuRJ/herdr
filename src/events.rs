@@ -40,6 +40,35 @@ pub struct ApiWorktreeRemoveRequest {
     pub respond_to: std::sync::mpsc::Sender<String>,
 }
 
+/// The waiting API caller for a deferred provider HTTP request. Mirrors
+/// `ApiWorktreeAddRequest`: the finish handler uses `operation_id` to
+/// stale-check, then answers on `respond_to`.
+#[derive(Debug)]
+pub struct ProviderApiRequest {
+    pub id: String,
+    pub operation_id: u64,
+    pub respond_to: std::sync::mpsc::Sender<String>,
+}
+
+/// Result of a background workflow node (invisible agent process or an
+/// image generation): the final answer text plus cache metadata, or the
+/// failure message.
+#[derive(Debug)]
+pub struct WorkflowNodeFinished {
+    pub run_id: String,
+    pub node_id: String,
+    pub result: Result<(String, crate::workflow::runs::NodeMeta), String>,
+}
+
+/// Delivered by the background provider HTTP thread (connectivity test or
+/// model fetch) back to the app event loop.
+#[derive(Debug)]
+pub struct ProviderHttpOutcome {
+    pub profile_id: String,
+    pub result: crate::provider::ProviderHttpResult,
+    pub api_request: Option<ProviderApiRequest>,
+}
+
 #[derive(Debug)]
 pub struct WorktreeRemoveResult {
     pub workspace_id: String,
@@ -172,4 +201,8 @@ pub enum AppEvent {
     WorktreeAddFinished(Box<WorktreeAddResult>),
     /// Background `git worktree remove` completed.
     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
+    /// Background provider connectivity test / model fetch completed.
+    ProviderHttpFinished(Box<ProviderHttpOutcome>),
+    /// Background workflow node (invisible agent / image_gen) completed.
+    WorkflowNodeFinished(Box<WorkflowNodeFinished>),
 }

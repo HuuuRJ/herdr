@@ -110,6 +110,8 @@ Raw socket method names use dot notation:
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
+| Providers | `provider.list`, `provider.get`, `provider.create`, `provider.update`, `provider.delete`, `provider.presets`, `provider.test`, `provider.models.fetch`, `provider.reveal` |
+| Workflows | `workflow.run`, `workflow.list`, `workflow.get`, `workflow.pause`, `workflow.resume`, `workflow.cancel`, `workflow.delete` |
 
 `agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait.
 
@@ -647,6 +649,22 @@ the active popup and returns
 pane; tab panes can target a workspace. Split, tab, zoomed, and overlay panes
 behave like normal Herdr panes, and `plugin.pane.focus` and `plugin.pane.close`
 continue to operate on those panes.
+
+## Provider profiles
+
+Provider profiles bind "which model, through which key, at which endpoint" for later workflow nodes. A profile is `{protocol, base_url, api_key, models}`; the same vendor can have several profiles (one per key), and `protocol` distinguishes the wire family: `openai-compat`, `anthropic`, or `gemini`. Base URLs only go to the root (for example `/v1`); endpoints are appended by the server.
+
+Profiles live in a user-global `providers.json` (0600) and are shared across sessions. API responses always mask the key (`sk-***cdef`); `provider.reveal` is the only method that returns the plaintext. Updates use omit-means-keep semantics - leave out `api_key` to keep the stored key.
+
+`provider.test` sends a one-token minimal chat request (falling back to a models-endpoint probe when no visible model is set) and classifies failures: 401/403 as auth, 404 as endpoint, 429 as rate limited. `provider.models.fetch` pulls the model list and merges it into the profile (manual entries survive, visibility is inherited by id) with a 500-model cap. Both run in a background curl subprocess with a 10-15s timeout and answer asynchronously; API keys never appear in the curl command line.
+
+## Workflows
+
+A workflow is a `.aflow.json` file: a named node list with `after` dependency edges. `workflow.run {path}` parses and validates the file, creates a dedicated workspace, and schedules the DAG. Node types: `agent` (claude-code / codex / custom runtimes, bound to a provider profile per node), `prompt_template` (pure text rendering), and `image_gen` (OpenAI-compatible images endpoint through the bound profile).
+
+Visible agent nodes run as labeled tabs in the run workspace; the platform shell wrapper mirrors output into the run directory and appends a `HERDR_EXIT:<code>` sentinel, so exit codes and output survive pane teardown. Invisible nodes (`"visible": false`) run as background processes.
+
+`workflow.pause` is a soft stop: running nodes finish, no new nodes dispatch. `workflow.resume` re-reads the workflow file and skips unchanged nodes via a content-hash cache — edit the file mid-pause (add, remove, or modify nodes), resume, and only affected nodes re-run. `workflow.cancel` kills running nodes and keeps the cache; `workflow.delete` removes the run directory and workspace. Runs persist under the state directory (`workflows/runs/<run_id>/`) with the newest `workflow.keep_runs` kept. `workflow.max_concurrent_agents` caps concurrent agent nodes across all runs. Custom commands run through the platform shell: POSIX sh on Unix, Windows PowerShell 5.1 on Windows (avoid `&&` there; use `;`).
 
 ## Socket transport
 

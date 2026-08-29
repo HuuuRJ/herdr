@@ -422,6 +422,38 @@ herdr plugin pane close <pane_id>
 
 `--env KEY=VALUE` 可以在启动进程的命令上重复使用,只作用于新启动的进程。当与调用方提供的环境变量冲突时,`HERDR_SOCKET_PATH`、`HERDR_BIN_PATH`、`HERDR_ENV`、`HERDR_WORKSPACE_ID`、`HERDR_TAB_ID`、`HERDR_PANE_ID`、`HERDR_PLUGIN_ID`、`HERDR_PLUGIN_ROOT`、`HERDR_PLUGIN_CONFIG_DIR`、`HERDR_PLUGIN_STATE_DIR`、`HERDR_PLUGIN_ENTRYPOINT_ID` 和 `HERDR_PLUGIN_CONTEXT_JSON` 等 Herdr 管理的变量保持权威。
 
+## 供应商
+
+供应商档案为工作流节点绑定模型、Key 与地址:
+
+```bash
+herdr provider list
+herdr provider presets
+herdr provider get <profile_id>
+herdr provider create --name NAME --protocol openai-compat|anthropic|gemini --base-url URL [--preset PRESET_ID] [--key KEY] [--model MODEL_ID]... [--note TEXT]
+herdr provider update <profile_id> [--name NAME] [--protocol ...] [--base-url URL] [--key KEY] [--weight N] [--disable|--enable] [--note TEXT]
+herdr provider delete <profile_id>
+herdr provider test <profile_id>
+herdr provider models <profile_id>
+herdr provider reveal <profile_id>
+```
+
+`provider list` 始终掩码显示 Key；`provider reveal` 返回存储的明文。`provider update` 省略 `--key` 即保留当前 Key。`provider test` 以最小请求拨测一次并回报 HTTP 状态、延迟与分类后的错误。`provider models` 拉取模型列表并合并进档案。档案按用户保存（不分会话），也可以在设置页管理。
+## 工作流
+
+运行与控制 `.aflow.json` 工作流 DAG:
+
+```bash
+herdr workflow run <path.aflow.json>
+herdr workflow list
+herdr workflow get <run_id>
+herdr workflow pause <run_id>
+herdr workflow resume <run_id>
+herdr workflow cancel <run_id>
+herdr workflow delete <run_id>
+```
+
+`workflow run` 校验文件、创建 run workspace，并把 agent 节点派发为可见 tab（或 `"visible": false` 时后台进程）。`workflow pause` 让在跑节点跑完但不再派发；`workflow resume` 重读文件，只重跑配置或上游输出变化了的节点。`workflow cancel` 杀掉在跑节点并保留缓存。节点 prompt 用 `{{node_id.output}}` 引用上游输出；每个 agent 节点绑定自己的供应商档案（模型、Key、地址）。
 ## 读取来源
 
 | 来源 | 含义 |

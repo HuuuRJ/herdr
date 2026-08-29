@@ -1089,6 +1089,7 @@ pub enum SettingsSection {
     Toast,
     PaneLabels,
     Integrations,
+    Providers,
 }
 
 impl SettingsSection {
@@ -1099,6 +1100,7 @@ impl SettingsSection {
         Self::Toast,
         Self::PaneLabels,
         Self::Integrations,
+        Self::Providers,
     ];
 
     pub fn label(self) -> &'static str {
@@ -1109,6 +1111,7 @@ impl SettingsSection {
             Self::Toast => "toasts",
             Self::PaneLabels => "pane labels",
             Self::Integrations => "integrations",
+            Self::Providers => "providers",
         }
     }
 }
@@ -1187,6 +1190,79 @@ pub struct SettingsState {
     pub original_palette: Option<Palette>,
     /// The theme name before opening settings.
     pub original_theme: Option<String>,
+    /// Provider section sub-state; populated while the Providers tab is
+    /// active (masked profile copies plus menu/edit overlays).
+    pub providers: Option<ProvidersSectionState>,
+}
+
+/// Overlay state for the Providers settings tab. Routed in three layers:
+/// field edit (`edit`) → action menu (`menu`) → profile list.
+#[derive(Default)]
+pub struct ProvidersSectionState {
+    /// Masked profile copies refreshed when the section opens.
+    pub profiles: Vec<crate::api::schema::ProviderProfileInfo>,
+    /// Action menu for the selected profile (edit fields / test / toggle /
+    /// delete), built from the existing menu-list pattern.
+    pub menu: Option<MenuListState>,
+    /// Single-field editor overlay for the selected profile.
+    pub edit: Option<ProviderFieldEdit>,
+    /// Profile ids with a connectivity test in flight (row indicator).
+    pub testing: std::collections::HashSet<String>,
+    /// Staged fields for the "new profile" flow (name → base URL → key).
+    pub draft: Option<ProviderDraft>,
+}
+
+/// Partially collected fields for a profile being created from the settings
+/// tab. The flow stages name, then base URL, then the key.
+#[derive(Default)]
+pub struct ProviderDraft {
+    pub name: String,
+    pub base_url: String,
+}
+
+/// Action-menu entries for the selected provider profile (settings tab).
+/// The trailing "new profile" entry also works when the list is empty.
+pub const PROVIDER_MENU_ITEMS: &[&str] = &[
+    "edit name",
+    "edit base URL",
+    "edit API key",
+    "edit note",
+    "toggle protocol",
+    "test connection",
+    "toggle enabled",
+    "delete profile",
+    "new profile",
+];
+
+/// One single-field editing session (name / base URL / key / note), using
+/// the same self-held buffer convention as the keybind-help search box.
+pub struct ProviderFieldEdit {
+    pub profile_id: String,
+    pub field: ProviderEditField,
+    pub buffer: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderEditField {
+    Name,
+    BaseUrl,
+    ApiKey,
+    Note,
+}
+
+impl ProviderEditField {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::BaseUrl => "base URL",
+            Self::ApiKey => "API key",
+            Self::Note => "note",
+        }
+    }
+
+    pub fn is_secret(self) -> bool {
+        matches!(self, Self::ApiKey)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1983,6 +2059,7 @@ impl AppState {
                 list: SelectionListState::new(0),
                 original_palette: None,
                 original_theme: None,
+                providers: None,
             },
             integration_recommendations: Vec::new(),
             agent_manifest_summaries: Vec::new(),

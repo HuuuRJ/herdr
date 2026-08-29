@@ -19,6 +19,16 @@ pub(crate) const SETTINGS_POPUP_WIDTH: u16 = 76;
 pub(crate) const SETTINGS_POPUP_BASE_HEIGHT: u16 = 22;
 
 pub(crate) fn settings_popup_height(app: &AppState) -> u16 {
+    if app.settings.section == crate::app::state::SettingsSection::Providers {
+        let list_rows = app
+            .settings
+            .providers
+            .as_ref()
+            .map(|section| section.profiles.len())
+            .unwrap_or(0)
+            .max(1) as u16;
+        return (14 + list_rows).max(SETTINGS_POPUP_BASE_HEIGHT);
+    }
     if app.settings.section != crate::app::state::SettingsSection::Integrations {
         return SETTINGS_POPUP_BASE_HEIGHT;
     }
@@ -164,6 +174,9 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
         }
         SettingsSection::Integrations => {
             render_settings_integrations(app, frame, content_area);
+        }
+        SettingsSection::Providers => {
+            render_settings_providers(app, frame, content_area);
         }
     }
 
@@ -421,4 +434,175 @@ fn render_settings_toggle(
         p,
         1,
     );
+}
+
+fn render_settings_providers(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+
+    // Layer 1: single-field editor.
+    if let Some(section) = app.settings.providers.as_ref() {
+        if let Some(edit) = section.edit.as_ref() {
+            let is_new = edit.profile_id.is_empty();
+            let title = if is_new {
+                format!("new provider profile · {}", edit.field.label())
+            } else {
+                format!("edit {} · {}", edit.field.label(), edit.profile_id)
+            };
+            let shown = if edit.field.is_secret() && edit.buffer.is_empty() {
+                "(leave blank to keep the current key)".to_string()
+            } else {
+                edit.buffer.clone()
+            };
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    format!(" {title}"),
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" ┌ ", Style::default().fg(p.accent)),
+                    Span::styled(shown, Style::default().fg(p.text)),
+                    Span::styled("▌", Style::default().fg(p.accent)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  enter save · esc cancel · ctrl+u clear",
+                    Style::default().fg(p.overlay1),
+                )),
+            ];
+            if is_new {
+                let stage = match edit.field {
+                    crate::app::state::ProviderEditField::Name => "step 1/3: name",
+                    crate::app::state::ProviderEditField::BaseUrl => {
+                        "step 2/3: base URL (to the root, e.g. /v1)"
+                    }
+                    _ => "step 3/3: API key",
+                };
+                lines.insert(
+                    1,
+                    Line::from(Span::styled(
+                        format!("  {stage}"),
+                        Style::default().fg(p.overlay1),
+                    )),
+                );
+            }
+            frame.render_widget(Paragraph::new(lines), area);
+            return;
+        }
+
+        // Layer 2: action menu for the selected profile.
+        if let Some(menu) = section.menu.as_ref() {
+            let selected_name = section
+                .profiles
+                .get(app.settings.list.selected)
+                .map(|profile| profile.name.as_str())
+                .unwrap_or("new profile");
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    format!(" provider actions · {selected_name}"),
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+            ];
+            for (idx, item) in crate::app::state::PROVIDER_MENU_ITEMS.iter().enumerate() {
+                let marker = if idx == menu.highlighted {
+                    " ▸ "
+                } else {
+                    "   "
+                };
+                let style = if idx == menu.highlighted {
+                    Style::default()
+                        .fg(panel_contrast_fg(p))
+                        .bg(p.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(p.text)
+                };
+                lines.push(Line::from(Span::styled(format!("{marker}{item}"), style)));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  enter choose · esc back",
+                Style::default().fg(p.overlay1),
+            )));
+            frame.render_widget(Paragraph::new(lines), area);
+            return;
+        }
+
+        // Layer 3: the profile list.
+        let mut lines = vec![
+            Line::from(Span::styled(
+                " provider profiles",
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "  bind a model, key, and endpoint per profile",
+                Style::default().fg(p.overlay1),
+            )),
+            Line::from(""),
+        ];
+        if section.profiles.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " no profiles yet · press n to create one",
+                Style::default().fg(p.overlay1),
+            )));
+        } else {
+            let max_visible = area.height.saturating_sub(4) as usize;
+            let scroll = if app.settings.list.selected >= max_visible && max_visible > 0 {
+                app.settings.list.selected - max_visible + 1
+            } else {
+                0
+            };
+            for (idx, profile) in section.profiles.iter().enumerate().skip(scroll) {
+                if idx - scroll >= max_visible {
+                    break;
+                }
+                let marker = if idx == app.settings.list.selected {
+                    " ▸ "
+                } else {
+                    "   "
+                };
+                let mut spans = vec![Span::raw(marker)];
+                let name_style = if profile.is_disabled {
+                    Style::default().fg(p.overlay0)
+                } else {
+                    Style::default().fg(p.text)
+                };
+                spans.push(Span::styled(profile.name.clone(), name_style));
+                spans.push(Span::styled(
+                    format!("  {}", protocol_label(profile.protocol)),
+                    Style::default().fg(p.accent),
+                ));
+                spans.push(Span::styled(
+                    format!("  {} models", profile.models.len()),
+                    Style::default().fg(p.overlay1),
+                ));
+                spans.push(Span::styled(
+                    format!("  {}", profile.api_key_masked),
+                    Style::default().fg(p.overlay0),
+                ));
+                if profile.is_disabled {
+                    spans.push(Span::styled("  disabled", Style::default().fg(p.overlay0)));
+                }
+                if section.testing.contains(&profile.id) {
+                    spans.push(Span::styled("  testing…", Style::default().fg(p.accent)));
+                }
+                lines.push(Line::from(spans));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  enter actions · n new profile",
+                Style::default().fg(p.overlay1),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+fn protocol_label(protocol: crate::api::schema::ProviderProtocol) -> &'static str {
+    match protocol {
+        crate::api::schema::ProviderProtocol::OpenaiCompat => "openai-compat",
+        crate::api::schema::ProviderProtocol::Anthropic => "anthropic",
+        crate::api::schema::ProviderProtocol::Gemini => "gemini",
+    }
 }
