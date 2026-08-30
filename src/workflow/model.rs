@@ -162,6 +162,12 @@ pub(crate) struct WorkflowNode {
     pub size: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_file: Option<String>,
+    /// Image-to-image input (P3e): a whole-field `{{id.output}}` reference
+    /// to an upstream image_gen artifact or a plain image file path. Some →
+    /// the request switches to POST /images/edits (multipart); None = plain
+    /// text-to-image via /images/generations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_image: Option<String>,
 
     // -- llm_chat --
     /// Optional system prompt (renders `{{id.output}}` refs like `prompt`).
@@ -333,6 +339,16 @@ impl WorkflowDef {
                     if node.output_file.as_deref().unwrap_or("").trim().is_empty() {
                         errors.push(format!("image_gen node '{}' requires output_file", node.id));
                     }
+                    if node
+                        .input_image
+                        .as_deref()
+                        .is_some_and(|input| input.trim().is_empty())
+                    {
+                        errors.push(format!(
+                            "image_gen node '{}' has a blank input_image",
+                            node.id
+                        ));
+                    }
                 }
                 // Empty model is a pre-flight error at the parse boundary so
                 // no request is ever sent without one (FR-3.8: 空模型双侧
@@ -495,7 +511,7 @@ impl WorkflowDef {
 }
 
 /// `{{node_id.output}}` references inside an agent prompt, template, custom
-/// command, `when` gate, or llm_chat system prompt.
+/// command, `when` gate, llm_chat system prompt, or image_gen input_image.
 pub(crate) fn template_references(node: &WorkflowNode) -> Vec<String> {
     let mut references = Vec::new();
     for text in [
@@ -504,6 +520,7 @@ pub(crate) fn template_references(node: &WorkflowNode) -> Vec<String> {
         node.custom_command.as_deref().unwrap_or(""),
         node.when.as_deref().unwrap_or(""),
         node.system.as_deref().unwrap_or(""),
+        node.input_image.as_deref().unwrap_or(""),
     ] {
         let mut rest = text;
         while let Some(start) = rest.find("{{") {
@@ -898,6 +915,81 @@ mod tests {
             gated.cache_projection(),
             "editing when must invalidate the node cache key"
         );
+    }
+
+    #[test]
+    fn input_image_participates_in_cache_hash() {
+        let base: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "image_gen")
+                .trim_end_matches('}')
+                .to_string()
+                + r#", "prompt": "p", "output_file": "out.png"}"#),
+        )
+        .unwrap();
+        let editing: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "image_gen")
+                .trim_end_matches('}')
+                .to_string()
+                + r#", "prompt": "p", "output_file": "out.png", "input_image": "{{gen.output}}"}"#),
+        )
+        .unwrap();
+        assert!(editing.input_image.is_some());
+        assert_ne!(
+            base.cache_projection(),
+            editing.cache_projection(),
+            "editing input_image must invalidate the node cache key"
+        );
+        // An unset field serializes away entirely: pre-P3e cache hashes stay
+        // byte-identical.
+        let projection = base.cache_projection().to_string();
+        assert!(
+            !projection.contains("input_image"),
+            "unset input_image must not leak into the cache projection: {projection}"
+        );
+    }
+
+    #[test]
+    fn image_gen_input_image_validates_refs_and_blank() {
+        // Good: whole-field upstream ref rides the standard dependency.
+        WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "gen", "type": "image_gen", "prompt": "a cat", "output_file": "a.png"},
+                {"id": "edit", "type": "image_gen", "prompt": "make it red", "output_file": "b.png",
+                 "after": ["gen"], "input_image": "{{gen.output}}"}
+            ]}"#,
+        )
+        .unwrap();
+
+        // Reference without a dependency edge is rejected at parse time.
+        let errors = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "gen", "type": "image_gen", "prompt": "a cat", "output_file": "a.png"},
+                {"id": "edit", "type": "image_gen", "prompt": "make it red", "output_file": "b.png",
+                 "input_image": "{{gen.output}}"}
+            ]}"#,
+        )
+        .unwrap_err();
+        assert!(errors.contains("does not depend on 'gen'"), "{errors}");
+
+        // Self reference.
+        let errors = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "edit", "type": "image_gen", "prompt": "p", "output_file": "b.png",
+                 "input_image": "{{edit.output}}"}
+            ]}"#,
+        )
+        .unwrap_err();
+        assert!(errors.contains("references its own output"), "{errors}");
+
+        // Blank.
+        let errors = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "image_gen", "prompt": "p", "output_file": "a.png",
+                 "input_image": "  "}
+            ]}"#,
+        )
+        .unwrap_err();
+        assert!(errors.contains("blank input_image"), "{errors}");
     }
 
     #[test]

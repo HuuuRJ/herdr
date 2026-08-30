@@ -27,6 +27,10 @@ use super::url::join_url;
 /// Hard ceiling for a models-list response body (4 MiB). Larger bodies are
 /// truncated and flagged; the 500-model merge cap does the real limiting.
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Multipart image edits answer with the generated image as inline base64;
+/// a single 1536px PNG exceeds the 4 MiB JSON cap. Same runaway bound,
+/// sized for the payload.
+const MAX_FORM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Models beyond this count are dropped with a warning (FR-3.4).
 const MAX_MODELS: usize = 500;
 
@@ -45,12 +49,83 @@ pub(crate) struct ProviderHttpResponse {
     pub(crate) transport_error: Option<String>,
 }
 
+/// One `-F` multipart form entry (P3e `/images/edits`): a literal text
+/// value, or a file streamed from disk. File paths ride argv as
+/// `name=@path` — the path only, never the bytes — mirroring the
+/// `--data @path` convention.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FormPart {
+    Text(String),
+    File(std::path::PathBuf),
+}
+
+/// curl `-F` metacharacters (verified against curl 8.13): `;` starts the
+/// part-parameter syntax (`name=value;type=…`) and silently truncates the
+/// value; a leading `@`/`<` switches to file-read syntax; surrounding
+/// double quotes are stripped. Values hitting any of these are staged to a
+/// temp file by `curl_form_args` and sent as `name=<path` instead.
+fn form_text_needs_staging(value: &str) -> bool {
+    value.contains(';')
+        || value.starts_with('@')
+        || value.starts_with('<')
+        || value.starts_with('"')
+}
+
+/// Build the `-F` argv fragments for a multipart form. Returns the
+/// fragments plus any staged temp files the caller must remove after the
+/// transfer. A file path containing `;` cannot be carried at all
+/// (`name=@path;…` would truncate the path at curl's parameter separator),
+/// so it is rejected up front rather than uploading the wrong file.
+fn curl_form_args(
+    form: &[(String, FormPart)],
+) -> Result<(Vec<String>, Vec<std::path::PathBuf>), String> {
+    static FORM_FILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut args = Vec::new();
+    let mut staged = Vec::new();
+    for (name, part) in form {
+        let value = match part {
+            FormPart::File(path) => {
+                let display = path.display().to_string();
+                if display.contains(';') {
+                    return Err(format!(
+                        "curl -F cannot upload '{display}': ';' is the parameter separator and would truncate the path"
+                    ));
+                }
+                format!("@{display}")
+            }
+            FormPart::Text(value) => {
+                if !form_text_needs_staging(value) {
+                    value.clone()
+                } else {
+                    let seq = FORM_FILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let file = std::env::temp_dir().join(format!(
+                        "herdr-form-{}-{seq}.part",
+                        std::process::id()
+                    ));
+                    std::fs::write(&file, value.as_bytes())
+                        .map_err(|err| format!("failed to stage form value: {err}"))?;
+                    staged.push(file.clone());
+                    format!("<{}", file.display())
+                }
+            }
+        };
+        args.push(format!("{name}={value}"));
+    }
+    Ok((args, staged))
+}
+
 fn run_curl(
     url: &str,
     headers: &[(String, String)],
     body: Option<&str>,
+    form: &[(String, FormPart)],
     max_time_secs: u64,
 ) -> ProviderHttpResponse {
+    let max_response = if form.is_empty() {
+        MAX_RESPONSE_BYTES
+    } else {
+        MAX_FORM_RESPONSE_BYTES
+    };
     let mut command = crate::noninteractive_process::curl_command();
     command
         .arg("-sS")
@@ -64,8 +139,29 @@ fn run_curl(
         .arg("-H")
         .arg("@-")
         .arg(url);
-    if let Some(body) = body {
-        command.arg("--data").arg(body);
+    // `--data` and `-F` are mutually exclusive; a form-bearing request
+    // never carries a JSON body.
+    let mut staged_form_files: Vec<std::path::PathBuf> = Vec::new();
+    if form.is_empty() {
+        if let Some(body) = body {
+            command.arg("--data").arg(body);
+        }
+    } else {
+        match curl_form_args(form) {
+            Ok((args, staged)) => {
+                for arg in args {
+                    command.arg("-F").arg(arg);
+                }
+                staged_form_files = staged;
+            }
+            Err(err) => {
+                return ProviderHttpResponse {
+                    status: None,
+                    body: String::new(),
+                    transport_error: Some(err),
+                };
+            }
+        }
     }
 
     let mut child = match command
@@ -76,6 +172,9 @@ fn run_curl(
     {
         Ok(child) => child,
         Err(err) => {
+            for file in &staged_form_files {
+                let _ = std::fs::remove_file(file);
+            }
             return ProviderHttpResponse {
                 status: None,
                 body: String::new(),
@@ -103,14 +202,14 @@ fn run_curl(
     let mut stderr = String::new();
     let mut has_more = true;
     if let Some(mut pipe) = child.stdout.take() {
-        let mut limited = (&mut pipe).take((MAX_RESPONSE_BYTES + 1) as u64);
+        let mut limited = (&mut pipe).take((max_response + 1) as u64);
         // Read to end; the size cap above bounds memory.
         while has_more {
             match limited.read_to_end(&mut stdout) {
                 Ok(0) | Err(_) => {
                     has_more = false;
                 }
-                Ok(_) if stdout.len() > MAX_RESPONSE_BYTES => {
+                Ok(_) if stdout.len() > max_response => {
                     has_more = false;
                 }
                 Ok(_) => {}
@@ -121,11 +220,14 @@ fn run_curl(
         let _ = pipe.read_to_string(&mut stderr);
     }
     let _ = child.wait();
+    for file in &staged_form_files {
+        let _ = std::fs::remove_file(file);
+    }
 
-    let truncated = stdout.len() > MAX_RESPONSE_BYTES;
+    let truncated = stdout.len() > max_response;
     let mut body = String::from_utf8_lossy(&stdout).to_string();
     if truncated {
-        body.truncate(MAX_RESPONSE_BYTES);
+        body.truncate(max_response);
     }
 
     // curl appends "\n{status}" on a completed HTTP exchange; missing tail
@@ -154,14 +256,17 @@ fn run_curl(
 /// llm_chat). Same conventions as `run_curl`; returns the parsed status with
 /// the body. `body` may be `"@path"` to stream the payload from a file —
 /// llm prompts embed upstream outputs and routinely exceed the Windows 32K
-/// command-line cap.
+/// command-line cap. A non-empty `form` switches the request to multipart
+/// (`-F`); callers must then omit any explicit Content-Type header — curl
+/// synthesizes the multipart boundary itself.
 pub(crate) fn provider_curl_json(
     url: &str,
     headers: &[(String, String)],
     body: Option<&str>,
+    form: &[(String, FormPart)],
     max_time_secs: u64,
 ) -> ProviderHttpResponse {
-    run_curl(url, headers, body, max_time_secs)
+    run_curl(url, headers, body, form, max_time_secs)
 }
 
 /// Binary curl download for sibling subsystems (workflow image artifacts).
@@ -346,6 +451,7 @@ pub(crate) fn test_connectivity(profile: &ProviderProfile) -> ProviderTestResult
             &url,
             &auth_headers(profile.protocol, &profile.api_key),
             None,
+            &[],
             10,
         );
         return finish_test(profile, response, None, started);
@@ -354,7 +460,7 @@ pub(crate) fn test_connectivity(profile: &ProviderProfile) -> ProviderTestResult
     let (url, body) = chat_endpoint(profile.protocol, &profile.base_url, &model);
     let mut headers = auth_headers(profile.protocol, &profile.api_key);
     content_type_json(&mut headers);
-    let response = run_curl(&url, &headers, Some(&body), 10);
+    let response = run_curl(&url, &headers, Some(&body), &[], 10);
     finish_test(profile, response, Some(model), started)
 }
 
@@ -516,7 +622,7 @@ pub(crate) fn parse_models_body(
 pub(crate) fn fetch_model_ids(profile: &ProviderProfile) -> Result<Vec<String>, String> {
     let (url, effective_protocol, _) = models_endpoint(profile);
     let headers = auth_headers(effective_protocol, &profile.api_key);
-    let response = run_curl(&url, &headers, None, 15);
+    let response = run_curl(&url, &headers, None, &[], 15);
     let redact_key = super::url::redact(&profile.api_key, &response.body);
     match response.status {
         Some(status) => match classify_http_status(status) {
@@ -600,6 +706,59 @@ mod tests {
             note: None,
             created_unix: 1,
         }
+    }
+
+    #[test]
+    fn form_text_staging_predicate_matches_curl_metacharacters() {
+        // Verified against curl 8.13 (local listener): `;` silently
+        // truncates the value, leading @/< switch to file-read syntax,
+        // surrounding quotes are stripped; `,` and embedded newlines pass
+        // through untouched.
+        assert!(form_text_needs_staging("a cat; watercolor"));
+        assert!(form_text_needs_staging("@file"));
+        assert!(form_text_needs_staging("<file"));
+        assert!(form_text_needs_staging("\"quoted\""));
+        assert!(!form_text_needs_staging("1024x1024,auto"));
+        assert!(!form_text_needs_staging("line1\nline2"));
+    }
+
+    #[test]
+    fn curl_form_args_stages_dirty_text_and_rejects_semicolon_paths() {
+        let (args, staged) = curl_form_args(&[
+            (
+                "prompt".to_string(),
+                FormPart::Text("a cat; watercolor".to_string()),
+            ),
+            (
+                "size".to_string(),
+                FormPart::Text("1024x1024".to_string()),
+            ),
+            (
+                "image".to_string(),
+                FormPart::File(std::path::PathBuf::from("in.png")),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(args[1], "size=1024x1024");
+        assert_eq!(args[2], "image=@in.png");
+        // The `;`-bearing prompt rides a staged file (`name=<path`) so the
+        // value reaches the server verbatim.
+        assert_eq!(staged.len(), 1);
+        assert!(args[0].starts_with("prompt=<"), "{}", args[0]);
+        assert_eq!(
+            std::fs::read_to_string(&staged[0]).unwrap(),
+            "a cat; watercolor"
+        );
+        let _ = std::fs::remove_file(&staged[0]);
+
+        // A file path with ';' cannot be carried by -F at all — reject
+        // instead of uploading a truncated path.
+        let err = curl_form_args(&[(
+            "image".to_string(),
+            FormPart::File(std::path::PathBuf::from("we;ird.png")),
+        )])
+        .unwrap_err();
+        assert!(err.contains(';'), "{err}");
     }
 
     #[test]

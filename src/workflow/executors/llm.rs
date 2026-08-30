@@ -216,8 +216,13 @@ pub(crate) fn run_llm_chat(
         });
     }
     let data = format!("@{}", body_file.display());
-    let response =
-        crate::provider::http::provider_curl_json(&url, &headers, Some(&data), max_time_secs);
+    let response = crate::provider::http::provider_curl_json(
+        &url,
+        &headers,
+        Some(&data),
+        &[],
+        max_time_secs,
+    );
     let _ = std::fs::remove_file(&body_file);
     let redacted = crate::provider::url::redact(&profile.api_key, &response.body);
     let Some(status) = response.status else {

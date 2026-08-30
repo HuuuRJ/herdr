@@ -554,6 +554,38 @@ impl crate::app::App {
                 }
             }
         };
+        // P3e image-to-image: resolve the input before spawning so a bad
+        // reference fails the node at dispatch (same path as a prompt
+        // render error) instead of mid-flight.
+        let input_image = {
+            let Some(live) = self.workflow_runs.get(run_id) else {
+                return false;
+            };
+            match node.input_image.as_deref() {
+                None => None,
+                Some(spec) => {
+                    match resolve_workflow_input_image(run_id, spec, &live.engine.outputs) {
+                        Ok(path) => Some(path),
+                        Err(err) => {
+                            self.fail_workflow_node(run_id, &node.id, err);
+                            return false;
+                        }
+                    }
+                }
+            }
+        };
+        if let Some(path) = input_image.as_ref().filter(|path| !path.exists()) {
+            self.fail_workflow_node(
+                run_id,
+                &node.id,
+                format!(
+                    "input image not found: {} (input_image: {})",
+                    path.display(),
+                    node.input_image.as_deref().unwrap_or("?")
+                ),
+            );
+            return false;
+        }
         let output_path = runs::node_root(run_id, &node.id)
             .join(node.output_file.as_deref().unwrap_or("image.png"));
         if node.visible {
@@ -588,6 +620,7 @@ impl crate::app::App {
                     &prompt,
                     size.as_deref(),
                     model.as_deref(),
+                    input_image.as_deref(),
                     &output_path,
                 ) {
                     Ok(artifact) => {
@@ -2231,6 +2264,52 @@ pub(crate) fn node_phase_str(phase: NodePhase) -> &'static str {
     }
 }
 
+/// Resolve an image_gen `input_image` spec (P3e) to the file to edit.
+///
+/// A whole-field `{{id.output}}` reference resolves to the upstream
+/// artifact: upstream outputs carry the bare artifact name (not a path),
+/// so it joins the upstream node's run directory. Any other value renders
+/// embedded refs inline and is treated as a file path — relative paths
+/// resolve against the server cwd, not the client's shell
+/// (`start_workflow_run` precedent). Existence is checked by the caller
+/// at dispatch time.
+fn resolve_workflow_input_image(
+    run_id: &str,
+    spec: &str,
+    outputs: &std::collections::HashMap<String, String>,
+) -> Result<std::path::PathBuf, String> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Err("input_image is blank (the referenced upstream may be skipped)".to_string());
+    }
+    if let Some(id) = trimmed
+        .strip_prefix("{{")
+        .and_then(|inner| inner.strip_suffix(".output}}"))
+    {
+        if !id.is_empty()
+            && id
+                .chars()
+                .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+        {
+            // Upstream outputs are bare artifact names; a skipped upstream
+            // leaves an empty port, which must not feed curl a blank path.
+            let artifact = outputs
+                .get(id)
+                .map(String::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("input image of node '{id}' is not available"))?;
+            return Ok(runs::node_root(run_id, id).join(artifact));
+        }
+    }
+    let rendered = render(trimmed, outputs)?;
+    let path = std::path::PathBuf::from(rendered);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir().unwrap_or_default().join(path))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2255,6 +2334,53 @@ mod tests {
         assert!(id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-')));
+    }
+
+    #[test]
+    fn input_image_whole_field_ref_resolves_upstream_artifact_dir() {
+        let mut outputs = std::collections::HashMap::new();
+        outputs.insert("gen".to_string(), "image.png".to_string());
+        // The upstream port carries a bare artifact name, so the reference
+        // must resolve inside the upstream node's run directory — not the
+        // editing node's own.
+        let path = resolve_workflow_input_image("run1", "{{gen.output}}", &outputs).unwrap();
+        assert_eq!(path, runs::node_root("run1", "gen").join("image.png"));
+
+        // A skipped upstream leaves an empty port: refuse, never feed curl
+        // a blank path.
+        outputs.insert("skipped_gen".to_string(), String::new());
+        let err = resolve_workflow_input_image("run1", "{{skipped_gen.output}}", &outputs)
+            .unwrap_err();
+        assert!(err.contains("not available"), "{err}");
+        let err = resolve_workflow_input_image("run1", "{{missing.output}}", &outputs).unwrap_err();
+        assert!(err.contains("not available"), "{err}");
+    }
+
+    #[test]
+    fn input_image_plain_paths_pin_absolute_or_server_cwd() {
+        // Absolute path passes through untouched.
+        let path =
+            resolve_workflow_input_image("run1", "E:/herdr/assets/in.png", &Default::default())
+                .unwrap();
+        assert_eq!(path, std::path::PathBuf::from("E:/herdr/assets/in.png"));
+        // Relative path resolves against the server cwd, not the client's
+        // shell (start_workflow_run precedent).
+        let path =
+            resolve_workflow_input_image("run1", "assets/in.png", &Default::default()).unwrap();
+        assert_eq!(
+            path,
+            std::env::current_dir().unwrap().join("assets/in.png")
+        );
+        // Embedded refs render inline before path resolution.
+        let mut outputs = std::collections::HashMap::new();
+        outputs.insert("gen".to_string(), "image.png".to_string());
+        let path = resolve_workflow_input_image("run1", "shots/{{gen.output}}", &outputs).unwrap();
+        assert_eq!(
+            path,
+            std::env::current_dir().unwrap().join("shots/image.png")
+        );
+        // Blank spec is refused outright.
+        assert!(resolve_workflow_input_image("run1", "  ", &Default::default()).is_err());
     }
 
     #[test]
