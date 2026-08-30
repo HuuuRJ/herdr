@@ -4402,6 +4402,13 @@
             "node_id": {
               "type": "string"
             },
+            "provider_pool": {
+              "description": "Bound provider pool (implicit group: profiles sharing a preset, or a\ncustom relay's own id); an empty string clears the binding. Setting a\nnon-empty pool clears a direct profile binding (mutually exclusive).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "provider_profile_id": {
               "description": "Bound provider profile id; an empty string clears the binding.",
               "type": [

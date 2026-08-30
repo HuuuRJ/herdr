@@ -25,6 +25,7 @@ use crate::workflow::executors::image::run_image_gen;
 use crate::workflow::executors::template::render;
 use crate::workflow::graph;
 use crate::workflow::model::{AgentRuntime, NodeType, WorkflowDef, WorkflowNode};
+use crate::workflow::pool::{self, PoolAttempt};
 use crate::workflow::runs::{self, NodeMeta, NodePhase, RunRecord, RunStatus};
 
 /// Live per-run execution state (engine + pane/process bindings).
@@ -277,6 +278,11 @@ impl crate::app::App {
             }
         }
         live.engine.cancel();
+        // Signal detached image threads before tearing down: their in-flight
+        // curl cannot be stopped, but the between-candidates retry can.
+        if let Some(flag) = self.workflow_image_cancel.remove(run_id) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.finish_workflow_run(run_id, RunStatus::Cancelled);
         self.refresh_workflow_view();
         Ok(())
@@ -361,9 +367,11 @@ impl crate::app::App {
                 return;
             };
             let idle = live.engine.status == RunStatus::Running
-                && live.engine.nodes.values().all(|node| {
-                    !matches!(node.phase, NodePhase::Pending | NodePhase::Running)
-                });
+                && live
+                    .engine
+                    .nodes
+                    .values()
+                    .all(|node| !matches!(node.phase, NodePhase::Pending | NodePhase::Running));
             if !idle {
                 return;
             }
@@ -443,7 +451,25 @@ impl crate::app::App {
     }
 
     fn dispatch_image_node(&mut self, run_id: &str, node: &WorkflowNode) -> bool {
-        let profile = self.workflow_profile_for(run_id, node);
+        // Pool-bound nodes schedule up to MAX_POOL_ATTEMPTS candidates up
+        // front; the thread retries inside itself because the numeric HTTP
+        // status (the failover signal) never leaves `run_image_gen`.
+        let pool_candidates = self.workflow_pool_candidates(run_id, node);
+        if node.provider_pool.is_some() && pool_candidates.as_ref().is_some_and(Vec::is_empty) {
+            self.skip_workflow_node(
+                run_id,
+                &node.id,
+                &format!(
+                    "blocked: provider pool '{}' has no enabled profiles",
+                    node.provider_pool.as_deref().unwrap_or("?")
+                ),
+            );
+            return true;
+        }
+        let profile = match &pool_candidates {
+            Some(candidates) => candidates.first().cloned(),
+            None => self.workflow_profile_for(run_id, node),
+        };
         // A missing or disabled bound profile is a precondition failure
         // (FR-9.1): blocked, not an execution error.
         let blocked = match &profile {
@@ -464,7 +490,11 @@ impl crate::app::App {
             self.skip_workflow_node(run_id, &node.id, &reason);
             return true;
         }
-        let profile = profile.expect("checked above");
+        // One or two candidates: the bound profile directly, or the pool's
+        // ordered picks (failover budget included).
+        let candidates = pool_candidates
+            .filter(|candidates| !candidates.is_empty())
+            .unwrap_or_else(|| vec![profile.expect("checked above")]);
         let prompt = {
             let Some(live) = self.workflow_runs.get(run_id) else {
                 return false;
@@ -488,31 +518,73 @@ impl crate::app::App {
         let model = node.model.clone();
         let node_id = node.id.clone();
         let run_id = run_id.to_string();
+        let report_attempts = node.provider_pool.is_some();
         if let Some(live) = self.workflow_runs.get_mut(&run_id) {
             live.engine.mark_running(&node_id);
         }
+        // Cancellation latch for the detached thread: cancel/finish arms it
+        // so the between-candidates retry loop stops before paying again
+        // (the in-flight curl itself cannot be interrupted).
+        let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.workflow_image_cancel
+            .insert(run_id.clone(), cancel_flag.clone());
 
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = run_image_gen(
-                &profile,
-                &prompt,
-                size.as_deref(),
-                model.as_deref(),
-                &output_path,
-            )
-            .map(|artifact| {
-                let meta = NodeMeta {
-                    artifact: Some(artifact.clone()),
-                    ..Default::default()
-                };
-                (artifact, meta)
-            });
+            let mut attempts: Vec<PoolAttempt> = Vec::new();
+            let mut result = Err("no pool candidates".to_string());
+            for profile in &candidates {
+                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    result = Err("run cancelled during image generation".to_string());
+                    break;
+                }
+                match run_image_gen(
+                    profile,
+                    &prompt,
+                    size.as_deref(),
+                    model.as_deref(),
+                    &output_path,
+                ) {
+                    Ok(artifact) => {
+                        if report_attempts {
+                            attempts.push(PoolAttempt {
+                                profile_id: profile.id.clone(),
+                                class: None,
+                                outcome: "ok".to_string(),
+                            });
+                        }
+                        let meta = NodeMeta {
+                            artifact: Some(artifact.clone()),
+                            ..Default::default()
+                        };
+                        result = Ok((artifact, meta));
+                        break;
+                    }
+                    Err(err) => {
+                        // Only key-classified failures (401/403/429/5xx)
+                        // justify the next profile; anything else would fail
+                        // the same way there.
+                        let class = pool::classify_error_text(&err);
+                        if report_attempts {
+                            attempts.push(PoolAttempt {
+                                profile_id: profile.id.clone(),
+                                class,
+                                outcome: pool::attempt_outcome(&err),
+                            });
+                        }
+                        result = Err(err);
+                        if class.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
             let _ = event_tx.blocking_send(AppEvent::WorkflowNodeFinished(Box::new(
                 WorkflowNodeFinished {
                     run_id,
                     node_id,
                     result,
+                    pool_attempts: attempts,
                 },
             )));
         });
@@ -534,8 +606,198 @@ impl crate::app::App {
             })
     }
 
+    /// Ordered pool candidates for a pool-bound node: enabled pool members
+    /// in scheduler order (weight desc, least-used, cooldown-late),
+    /// excluding profiles this dispatch chain already tried, capped at the
+    /// remaining failover budget. Returns `None` for direct-bound/unbound
+    /// nodes. The first candidate is recorded as the chain's pending attempt
+    /// (idempotently, so a failover probe and the re-dispatch that follows
+    /// agree on one entry).
+    /// Pure pool ordering: enabled members in scheduler order, minus the
+    /// profiles this dispatch chain already tried, capped at the remaining
+    /// failover budget. No bookkeeping side effects (the failover probe must
+    /// not consume the dispatch's attempt slot).
+    fn workflow_pool_ordering(
+        &self,
+        pool_name: &str,
+        run_id: &str,
+        node_id: &str,
+    ) -> Vec<crate::api::schema::ProviderProfile> {
+        let now = Instant::now();
+        let profiles = crate::persist::provider_registry::load();
+        let attempted: Vec<String> = self
+            .workflow_pool_attempts
+            .get(&(run_id.to_string(), node_id.to_string()))
+            .map(|chain| {
+                chain
+                    .iter()
+                    .map(|attempt| attempt.profile_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let health = &self.workflow_pool_health;
+        pool::order_pool_members(pool_name, &profiles, &health.used, &|id| {
+            health.cooldown_remaining(id, now)
+        })
+        .into_iter()
+        .filter(|profile| !attempted.contains(&profile.id))
+        .take(pool::MAX_POOL_ATTEMPTS.saturating_sub(attempted.len()))
+        .cloned()
+        .collect()
+    }
+
+    /// Ordered pool candidates for a pool-bound node; the first candidate is
+    /// recorded as the chain's pending attempt (idempotently, so a re-dispatch
+    /// that picks the same profile does not double-count). Returns `None`
+    /// for direct-bound/unbound nodes.
+    fn workflow_pool_candidates(
+        &mut self,
+        run_id: &str,
+        node: &WorkflowNode,
+    ) -> Option<Vec<crate::api::schema::ProviderProfile>> {
+        let pool_name = node.provider_pool.clone()?;
+        let candidates = self.workflow_pool_ordering(&pool_name, run_id, &node.id);
+        if let Some(first) = candidates.first() {
+            let key = (run_id.to_string(), node.id.clone());
+            let chain = self.workflow_pool_attempts.entry(key).or_default();
+            if chain.last().map(|last| last.profile_id.as_str()) != Some(first.id.as_str()) {
+                chain.push(PoolAttempt {
+                    profile_id: first.id.clone(),
+                    class: None,
+                    outcome: "pending".to_string(),
+                });
+            }
+        }
+        Some(candidates)
+    }
+
+    /// Pool failover gate for a failed pool-bound agent node: classify the
+    /// failure, cool the attempted profile down, and re-dispatch with the
+    /// next candidate when budget remains. Image nodes fail over inside
+    /// their generation thread instead. Returns true when the node was
+    /// re-spawned (it stays Running — no drain, no slot churn).
+    fn try_pool_failover(&mut self, run_id: &str, node_id: &str, error_text: &str) -> bool {
+        let Some(node) = self
+            .workflow_runs
+            .get(run_id)
+            .and_then(|live| live.engine.def.node(node_id).cloned())
+        else {
+            return false;
+        };
+        if node.provider_pool.is_none() || node.node_type != NodeType::Agent {
+            return false;
+        }
+        // Fresh-guard (P3a symmetry): a failure report racing the timeout
+        // kill arrives for a node that already reached Error — the Ok path
+        // (`complete_workflow_node_with`) guards this, and re-dispatch must
+        // not resurrect a terminal node with a fresh attempt budget either.
+        let node_running = self
+            .workflow_runs
+            .get(run_id)
+            .and_then(|live| live.engine.nodes.get(node_id))
+            .is_some_and(|state| state.phase == NodePhase::Running);
+        if !node_running {
+            return false;
+        }
+        let Some(class) = pool::classify_error_text(error_text) else {
+            return false;
+        };
+        // The key is bad regardless of what happens next — record the
+        // cooldown and the chain outcome before deciding to re-spawn.
+        let key = (run_id.to_string(), node_id.to_string());
+        let attempted_profile = self
+            .workflow_pool_attempts
+            .get(&key)
+            .and_then(|chain| chain.last())
+            .map(|last| last.profile_id.clone());
+        let attempted_count = self
+            .workflow_pool_attempts
+            .get(&key)
+            .map_or(0, |chain| chain.len());
+        if let Some(profile_id) = &attempted_profile {
+            self.workflow_pool_health
+                .penalize(profile_id, class, Instant::now());
+            if let Some(chain) = self.workflow_pool_attempts.get_mut(&key) {
+                if let Some(last) = chain.last_mut() {
+                    if last.outcome == "pending" {
+                        last.outcome = pool::attempt_outcome(error_text);
+                    }
+                }
+            }
+        }
+        // Only live dispatches fail over: a draining (terminal-status) run
+        // must not start new spend, and a paused run re-runs the node fresh
+        // on resume. The attempt budget includes the first dispatch.
+        let running = self
+            .workflow_runs
+            .get(run_id)
+            .is_some_and(|live| live.engine.status == RunStatus::Running);
+        if !running || attempted_count >= pool::MAX_POOL_ATTEMPTS {
+            return false;
+        }
+        // Pure probe: the next dispatch records the attempt itself, so this
+        // must not consume the slot a moment early.
+        let has_next = !self
+            .workflow_pool_ordering(
+                node.provider_pool.as_deref().unwrap_or("?"),
+                run_id,
+                node_id,
+            )
+            .is_empty();
+        if !has_next {
+            return false;
+        }
+        tracing::info!(
+            run_id,
+            node_id,
+            class = class.label(),
+            "pool failover: next profile"
+        );
+        // Full re-dispatch rebuilds env, argv, dsh settings.yaml, temp homes,
+        // and the deadline from the alternate profile.
+        self.dispatch_agent_node(run_id, &node)
+    }
+
+    /// Settle a completed pool node: count the winning profile's use, close
+    /// the chain, and carry its trace into the node metadata.
+    fn settle_pool_success(&mut self, run_id: &str, node_id: &str, mut meta: NodeMeta) -> NodeMeta {
+        let key = (run_id.to_string(), node_id.to_string());
+        if let Some(mut chain) = self.workflow_pool_attempts.remove(&key) {
+            if let Some(last) = chain.last() {
+                self.workflow_pool_health.record_use(&last.profile_id);
+            }
+            if let Some(last) = chain.last_mut() {
+                if last.outcome == "pending" {
+                    last.outcome = "ok".to_string();
+                }
+            }
+            if meta.pool_attempts.is_none() {
+                meta.pool_attempts = Some(pool::format_attempts(&chain));
+            }
+        }
+        meta
+    }
+
     fn dispatch_agent_node(&mut self, run_id: &str, node: &WorkflowNode) -> bool {
-        let profile = self.workflow_profile_for(run_id, node);
+        // Pool-bound nodes take their first scheduled candidate (a failover
+        // re-dispatch lands here too and takes the next one); direct-bound
+        // and unbound nodes keep the single-profile path.
+        let pool_candidates = self.workflow_pool_candidates(run_id, node);
+        if node.provider_pool.is_some() && pool_candidates.as_ref().is_some_and(Vec::is_empty) {
+            self.skip_workflow_node(
+                run_id,
+                &node.id,
+                &format!(
+                    "blocked: provider pool '{}' has no enabled profiles",
+                    node.provider_pool.as_deref().unwrap_or("?")
+                ),
+            );
+            return true;
+        }
+        let profile = match &pool_candidates {
+            Some(candidates) => candidates.first().cloned(),
+            None => self.workflow_profile_for(run_id, node),
+        };
         // Bound-but-unusable profile = blocked precondition (FR-9.1); an
         // unbound agent node legitimately uses the CLI's own config.
         let blocked = match &profile {
@@ -828,6 +1090,7 @@ impl crate::app::App {
                             run_id,
                             node_id,
                             result: Err(format!("failed to spawn: {err}")),
+                            pool_attempts: Vec::new(),
                         },
                     )));
                     return;
@@ -887,6 +1150,8 @@ impl crate::app::App {
                     run_id,
                     node_id,
                     result,
+                    // Agent chains live App-side; the thread cannot see them.
+                    pool_attempts: Vec::new(),
                 },
             )));
         });
@@ -950,7 +1215,12 @@ impl crate::app::App {
                     output.exit_code.unwrap_or(-1)
                 )
             };
-            self.fail_workflow_node(&run_id, &node_id, message);
+            // Pool-bound nodes with budget left re-spawn on the next
+            // profile instead of failing (P3c); the raw log is consumed
+            // above, before the re-dispatch overwrites it.
+            if !self.try_pool_failover(&run_id, &node_id, &message) {
+                self.fail_workflow_node(&run_id, &node_id, message);
+            }
         }
         self.refresh_workflow_view();
         true
@@ -961,6 +1231,7 @@ impl crate::app::App {
             run_id,
             node_id,
             result,
+            pool_attempts,
         } = *event;
         // Capture viewer-pane + artifact before completion may finish the
         // run and drop the live state (I2 pane projection happens after).
@@ -972,13 +1243,34 @@ impl crate::app::App {
             .as_ref()
             .ok()
             .and_then(|(_, meta)| meta.artifact.clone());
+        // Image threads close their whole chain in-thread; adopt it as the
+        // authoritative App-side record before completion reads it back,
+        // recording each failure's cooldown (the thread cannot). A chain
+        // arriving for a run that already finished (cancel raced the detached
+        // curl thread) is dropped — the run-gone check below discards its
+        // result the same way.
+        if !pool_attempts.is_empty() && self.workflow_runs.contains_key(&run_id) {
+            let now = Instant::now();
+            for attempt in &pool_attempts {
+                if let Some(class) = attempt.class {
+                    self.workflow_pool_health
+                        .penalize(&attempt.profile_id, class, now);
+                }
+            }
+            self.workflow_pool_attempts
+                .insert((run_id.clone(), node_id.clone()), pool_attempts);
+        }
         if let Some(live) = self.workflow_runs.get_mut(&run_id) {
             live.pid_of_node.remove(&node_id);
             live.deadline_of_node.remove(&node_id);
         }
         match result {
             Ok((text, meta)) => self.complete_workflow_node_with(&run_id, &node_id, text, meta),
-            Err(err) => self.fail_workflow_node(&run_id, &node_id, err),
+            Err(err) => {
+                if !self.try_pool_failover(&run_id, &node_id, &err) {
+                    self.fail_workflow_node(&run_id, &node_id, err);
+                }
+            }
         }
         if let (Some(pane), Some(artifact)) = (viewer_pane, artifact) {
             self.display_workflow_image(pane, &run_id, &node_id, &artifact);
@@ -1068,22 +1360,29 @@ impl crate::app::App {
         // auth echo would otherwise land in output.txt verbatim.
         let output = self.redact_workflow_node_text(run_id, node_id, output);
         cleanup_runtime_homes(run_id, node_id);
-        let Some(live) = self.workflow_runs.get_mut(run_id) else {
-            return;
-        };
         // A late completion (pane death racing the timeout kill, a duplicated
         // report) must not resurrect a node that already reached a terminal
         // phase, nor overwrite its persisted result.
-        let terminal = live.engine.nodes.get(node_id).is_some_and(|node| {
-            matches!(
-                node.phase,
-                NodePhase::Done | NodePhase::Error | NodePhase::Skipped
-            )
-        });
+        let terminal = {
+            let Some(live) = self.workflow_runs.get(run_id) else {
+                return;
+            };
+            live.engine.nodes.get(node_id).is_some_and(|node| {
+                matches!(
+                    node.phase,
+                    NodePhase::Done | NodePhase::Error | NodePhase::Skipped
+                )
+            })
+        };
         if terminal {
             tracing::debug!(run_id, node_id, "late node completion ignored");
             return;
         }
+        // Pool nodes carry their dispatch trace into the metadata here.
+        let meta = self.settle_pool_success(run_id, node_id, meta);
+        let Some(live) = self.workflow_runs.get_mut(run_id) else {
+            return;
+        };
         let (config_hash, inputs_hash) = workflow_cache_keys(&live.engine, node_id);
         let meta = NodeMeta {
             config_hash,
@@ -1103,6 +1402,15 @@ impl crate::app::App {
 
     fn fail_workflow_node(&mut self, run_id: &str, node_id: &str, error: String) {
         let error = self.redact_workflow_node_text(run_id, node_id, error);
+        // A pool node's failure names its full attempt chain so the operator
+        // sees which profiles were tried and why each fell over.
+        let error = match self
+            .workflow_pool_attempts
+            .remove(&(run_id.to_string(), node_id.to_string()))
+        {
+            Some(chain) => format!("pool[{}] {}", pool::format_attempts(&chain), error),
+            None => error,
+        };
         cleanup_runtime_homes(run_id, node_id);
         let Some(live) = self.workflow_runs.get_mut(run_id) else {
             return;
@@ -1160,28 +1468,42 @@ impl crate::app::App {
     }
 
     /// Redact a node's captured text/error against its bound profile key —
-    /// grok/dsh config echoes are the realistic leak surface.
+    /// grok/dsh config echoes are the realistic leak surface. Pool nodes
+    /// redact against every profile the chain tried: a failover means the
+    /// text may carry the PREVIOUS key.
     fn redact_workflow_node_text(&self, run_id: &str, node_id: &str, text: String) -> String {
-        let Some(profile_id) = self
+        let profile_ids: Vec<String> = match self
             .workflow_runs
             .get(run_id)
             .and_then(|live| live.engine.def.node(node_id))
             .and_then(|node| node.provider_profile_id.clone())
-        else {
-            return text;
+        {
+            Some(profile_id) => vec![profile_id],
+            None => self
+                .workflow_pool_attempts
+                .get(&(run_id.to_string(), node_id.to_string()))
+                .map(|chain| {
+                    chain
+                        .iter()
+                        .map(|attempt| attempt.profile_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
-        let Some(api_key) = crate::persist::provider_registry::load()
-            .into_iter()
-            .find(|profile| profile.id == profile_id)
-            .map(|profile| profile.api_key)
-        else {
+        if profile_ids.is_empty() {
             return text;
-        };
-        if api_key.is_empty() {
-            text
-        } else {
-            crate::provider::url::redact(&api_key, &text)
         }
+        let mut text = text;
+        for api_key in crate::persist::provider_registry::load()
+            .into_iter()
+            .filter(|profile| profile_ids.contains(&profile.id))
+            .map(|profile| profile.api_key)
+        {
+            if !api_key.is_empty() {
+                text = crate::provider::url::redact(&api_key, &text);
+            }
+        }
+        text
     }
 
     /// Terminal cleanup: persist the final record, drop live state, and
@@ -1192,6 +1514,14 @@ impl crate::app::App {
         let Some(mut live) = self.workflow_runs.remove(run_id) else {
             return;
         };
+        // Cancel skips complete/fail, so pool chains would otherwise leak.
+        self.workflow_pool_attempts
+            .retain(|(chain_run, _), _| chain_run != run_id);
+        // Terminal for every path: arm the image-thread latch (a done run's
+        // detached retry would be pure waste) and drop the flag entry.
+        if let Some(flag) = self.workflow_image_cancel.remove(run_id) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         live.engine.status = status;
         let record = live.engine.record(live.started_unix, Some(now_unix()));
         let workspace_idx = live.workspace_idx;
@@ -1330,6 +1660,19 @@ impl crate::app::App {
         Some(live.engine.record(live.started_unix, None))
     }
 
+    /// Pool group names with at least one enabled profile (the inspector's
+    /// pool picker list).
+    pub(crate) fn workflow_pool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = crate::persist::provider_registry::load()
+            .iter()
+            .filter(|profile| !profile.is_disabled)
+            .map(|profile| pool::pool_group_key(profile).to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     // -- graph view projection -------------------------------------------------
 
     /// Rebuild the AppState workflow projection: the sidebar runs list
@@ -1436,6 +1779,7 @@ impl crate::app::App {
                         kind: node_kind_str(node.node_type).to_string(),
                         runtime: node.runtime.map(|runtime| runtime.label().to_string()),
                         profile_id: node.provider_profile_id.clone(),
+                        provider_pool: node.provider_pool.clone(),
                         model: node
                             .model
                             .clone()
@@ -1485,6 +1829,7 @@ impl crate::app::App {
                     kind: node_kind_str(node.node_type).to_string(),
                     runtime: node.runtime.map(|runtime| runtime.label().to_string()),
                     profile_id: node.provider_profile_id.clone(),
+                    provider_pool: node.provider_pool.clone(),
                     model: node
                         .model
                         .clone()

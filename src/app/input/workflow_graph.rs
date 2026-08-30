@@ -47,7 +47,8 @@ impl crate::app::App {
                 }
                 WorkflowGraphAction::OpenInspector { node_id } => {
                     let profiles = self.masked_provider_profiles();
-                    open_inspector(&mut self.state, &node_id, profiles);
+                    let pools = self.workflow_pool_names();
+                    open_inspector(&mut self.state, &node_id, profiles, pools);
                 }
                 WorkflowGraphAction::SwitchRun { run_id } => {
                     self.open_workflow_graph(&run_id);
@@ -62,9 +63,10 @@ impl crate::app::App {
 }
 
 /// Field order of the inspector list.
-const INSPECTOR_FIELDS: [WorkflowInspectorField; 6] = [
+const INSPECTOR_FIELDS: [WorkflowInspectorField; 7] = [
     WorkflowInspectorField::Runtime,
     WorkflowInspectorField::Profile,
+    WorkflowInspectorField::Pool,
     WorkflowInspectorField::Model,
     WorkflowInspectorField::TimeoutMs,
     WorkflowInspectorField::Visible,
@@ -391,6 +393,7 @@ fn open_field_editor(
         .iter()
         .map(|profile| (profile.id.clone(), profile.name.clone()))
         .collect();
+    let pools: Vec<String> = state.workflow_view.inspector.as_ref()?.pools.clone();
     let inspector = state.workflow_view.inspector.as_mut()?;
     match field {
         WorkflowInspectorField::Runtime => {
@@ -417,6 +420,20 @@ fn open_field_editor(
                 .profile_id
                 .as_deref()
                 .and_then(|id| profiles.iter().position(|(profile_id, _)| profile_id == id))
+                .map_or(0, |index| index + 1);
+            inspector.choice = Some(WorkflowInspectorChoice {
+                field,
+                list: SelectionListState::new(selected),
+                options,
+            });
+        }
+        WorkflowInspectorField::Pool => {
+            let mut options = vec!["(unbound)".to_string()];
+            options.extend(pools.iter().cloned());
+            let selected = node
+                .provider_pool
+                .as_deref()
+                .and_then(|current| pools.iter().position(|pool| pool == current))
                 .map_or(0, |index| index + 1);
             inspector.choice = Some(WorkflowInspectorChoice {
                 field,
@@ -509,6 +526,14 @@ fn inspector_choice_key(state: &mut AppState, key: KeyEvent) -> Option<WorkflowG
                             .get(index - 1)
                             .map(|profile| profile.id.clone())
                             .unwrap_or_default()
+                    }
+                }
+                // Pool rows map back to group names the same way.
+                WorkflowInspectorField::Pool => {
+                    if index == 0 {
+                        String::new()
+                    } else {
+                        options.get(index).cloned().unwrap_or_default()
                     }
                 }
                 _ => options[index].clone(),
@@ -605,6 +630,7 @@ fn apply_patch(
         node_id,
         runtime: None,
         provider_profile_id: None,
+        provider_pool: None,
         model: None,
         timeout_ms: None,
         visible: None,
@@ -613,6 +639,7 @@ fn apply_patch(
     match field {
         WorkflowInspectorField::Runtime => patch.runtime = Some(raw.to_string()),
         WorkflowInspectorField::Profile => patch.provider_profile_id = Some(raw.to_string()),
+        WorkflowInspectorField::Pool => patch.provider_pool = Some(raw.to_string()),
         WorkflowInspectorField::Model => patch.model = Some(raw.to_string()),
         WorkflowInspectorField::TimeoutMs => {
             patch.timeout_ms = Some(raw.parse::<u64>().unwrap_or(0))
@@ -634,12 +661,13 @@ fn apply_patch(
     ))))
 }
 
-/// Prime the inspector for a node (App side: masked profiles from the
-/// registry join here).
+/// Prime the inspector for a node (App side: masked profiles and pool group
+/// names from the registry join here).
 pub(crate) fn open_inspector(
     state: &mut AppState,
     node_id: &str,
     profiles: Vec<crate::api::schema::ProviderProfileInfo>,
+    pools: Vec<String>,
 ) {
     state.workflow_view.inspector = Some(WorkflowInspectorState {
         node_id: node_id.to_string(),
@@ -647,6 +675,7 @@ pub(crate) fn open_inspector(
         edit: None,
         choice: None,
         profiles,
+        pools,
     });
 }
 
@@ -662,6 +691,7 @@ mod tests {
             kind: "agent".to_string(),
             runtime: Some("claude-code".to_string()),
             profile_id: None,
+            provider_pool: None,
             model: Some("m".to_string()),
             visible: true,
             enabled: true,
@@ -771,9 +801,9 @@ mod tests {
     #[test]
     fn inspector_edits_model_via_update_api() {
         let mut state = view_state_open();
-        open_inspector(&mut state, "a", Vec::new());
-        // Rows: runtime(0) profile(1) model(2).
-        for _ in 0..2 {
+        open_inspector(&mut state, "a", Vec::new(), Vec::new());
+        // Rows: runtime(0) profile(1) pool(2) model(3).
+        for _ in 0..3 {
             update_workflow_graph_state(&mut state, key(KeyCode::Down));
         }
         update_workflow_graph_state(&mut state, key(KeyCode::Enter));
@@ -807,7 +837,7 @@ mod tests {
     #[test]
     fn inspector_choice_picks_runtime() {
         let mut state = view_state_open();
-        open_inspector(&mut state, "a", Vec::new());
+        open_inspector(&mut state, "a", Vec::new(), Vec::new());
         update_workflow_graph_state(&mut state, key(KeyCode::Enter));
         // Runtime choice list is open; move to grok-build (index 2).
         for _ in 0..2 {
@@ -827,7 +857,7 @@ mod tests {
     #[test]
     fn inspector_esc_is_layer_local() {
         let mut state = view_state_open();
-        open_inspector(&mut state, "a", Vec::new());
+        open_inspector(&mut state, "a", Vec::new(), Vec::new());
         update_workflow_graph_state(&mut state, key(KeyCode::Enter));
         update_workflow_graph_state(&mut state, key(KeyCode::Esc));
         assert!(state
@@ -914,9 +944,9 @@ mod tests {
     #[test]
     fn timeout_rejects_non_numeric() {
         let mut state = view_state_open();
-        open_inspector(&mut state, "a", Vec::new());
-        // Rows: runtime(0) profile(1) model(2) timeout(3).
-        for _ in 0..3 {
+        open_inspector(&mut state, "a", Vec::new(), Vec::new());
+        // Rows: runtime(0) profile(1) pool(2) model(3) timeout(4).
+        for _ in 0..4 {
             update_workflow_graph_state(&mut state, key(KeyCode::Down));
         }
         update_workflow_graph_state(&mut state, key(KeyCode::Enter));

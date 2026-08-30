@@ -136,6 +136,11 @@ pub(crate) struct WorkflowNode {
     pub runtime: Option<AgentRuntime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_profile_id: Option<String>,
+    /// Bound provider pool (implicit group: enabled profiles sharing the
+    /// preset, or a custom relay's own id). Schedules and fails over across
+    /// the pool's profiles; mutually exclusive with `provider_profile_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_pool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,6 +255,12 @@ impl WorkflowDef {
                         node.id
                     ));
                 }
+            }
+            if node.provider_pool.is_some() && node.provider_profile_id.is_some() {
+                errors.push(format!(
+                    "node '{}' cannot bind both provider_pool and provider_profile_id",
+                    node.id
+                ));
             }
             match node.node_type {
                 NodeType::Agent => {
@@ -725,7 +736,8 @@ mod tests {
     }
 
     #[test]
-    fn skip_on_error_defaults_false_and_participates_in_cache_hash() {        let base: WorkflowNode = serde_json::from_str(
+    fn skip_on_error_defaults_false_and_participates_in_cache_hash() {
+        let base: WorkflowNode = serde_json::from_str(
             &(node_json("a", "agent").trim_end_matches('}').to_string()
                 + r#", "runtime": "claude-code", "prompt": "p"}"#),
         )
@@ -787,14 +799,70 @@ mod tests {
     }
 
     #[test]
+    fn provider_pool_binds_or_direct_profile_never_both() {
+        // Pool alone is valid.
+        WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "agent", "runtime": "claude-code", "prompt": "p",
+                 "provider_pool": "kimi"}
+            ]}"#,
+        )
+        .unwrap();
+
+        // Pool and direct binding together are rejected.
+        let errors = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "agent", "runtime": "claude-code", "prompt": "p",
+                 "provider_profile_id": "p1", "provider_pool": "kimi"}
+            ]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            errors.contains("cannot bind both"),
+            "dual binding rejected: {errors}"
+        );
+    }
+
+    #[test]
+    fn provider_pool_participates_in_cache_hash() {
+        let base: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "agent").trim_end_matches('}').to_string()
+                + r#", "runtime": "claude-code", "prompt": "p"}"#),
+        )
+        .unwrap();
+        let pooled: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "agent").trim_end_matches('}').to_string()
+                + r#", "runtime": "claude-code", "prompt": "p", "provider_pool": "kimi"}"#),
+        )
+        .unwrap();
+        assert!(pooled.provider_pool.is_some());
+        assert_ne!(
+            base.cache_projection(),
+            pooled.cache_projection(),
+            "editing provider_pool must invalidate the node cache key"
+        );
+        // An unset pool serializes away entirely: pre-P3c cache hashes stay
+        // byte-identical.
+        let projection = base.cache_projection().to_string();
+        assert!(
+            !projection.contains("provider_pool"),
+            "unset pool must not leak into the cache projection: {projection}"
+        );
+    }
+
+    #[test]
     fn when_participates_in_cache_hash() {
         let base: WorkflowNode = serde_json::from_str(
-            &(node_json("a", "prompt_template").trim_end_matches('}').to_string()
+            &(node_json("a", "prompt_template")
+                .trim_end_matches('}')
+                .to_string()
                 + r#", "template": "t"}"#),
         )
         .unwrap();
         let gated: WorkflowNode = serde_json::from_str(
-            &(node_json("a", "prompt_template").trim_end_matches('}').to_string()
+            &(node_json("a", "prompt_template")
+                .trim_end_matches('}')
+                .to_string()
                 + r#", "template": "t", "when": "1 == 1"}"#),
         )
         .unwrap();

@@ -278,7 +278,10 @@ impl EngineRun {
         if !all_terminal {
             return None;
         }
-        let any_error = self.nodes.values().any(|node| node.phase == NodePhase::Error);
+        let any_error = self
+            .nodes
+            .values()
+            .any(|node| node.phase == NodePhase::Error);
         let any_blocked = self.nodes.values().any(|node| {
             node.phase == NodePhase::Skipped
                 && node
@@ -600,7 +603,10 @@ mod tests {
         run.mark_node_error("a", "timed out".to_string(), false);
         // The pane dies after the timeout kill: its completion must not
         // flip the errored node back to Done.
-        assert_eq!(run.mark_done("a", "late".to_string(), output_hash("late")), None);
+        assert_eq!(
+            run.mark_done("a", "late".to_string(), output_hash("late")),
+            None
+        );
         assert_eq!(run.nodes.get("a").unwrap().phase, NodePhase::Error);
         // A re-fired timeout must not overwrite the recorded error either.
         run.mark_node_error("a", "timed out again".to_string(), false);
@@ -636,9 +642,10 @@ mod tests {
         // Resume: nothing retryable remains, every node is Done — the run
         // must settle instead of wedging live at Running.
         run.resume();
-        let idle = run.nodes.values().all(|node| {
-            !matches!(node.phase, NodePhase::Pending | NodePhase::Running)
-        });
+        let idle = run
+            .nodes
+            .values()
+            .all(|node| !matches!(node.phase, NodePhase::Pending | NodePhase::Running));
         assert!(idle, "no Pending/Running nodes survive the prune");
         assert_eq!(run.settle(), Some(RunStatus::Done));
     }

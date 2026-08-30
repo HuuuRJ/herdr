@@ -118,7 +118,12 @@ pub(crate) fn run_image_gen(
                 ));
             };
             if !(200..300).contains(&status) {
-                return Err(format!("image download returned HTTP {status}"));
+                // Deliberately NOT phrased "HTTP <status>" (and not prefixed
+                // like the generation errors): an artifact-download failure is
+                // a CDN/relay problem, not a provider-key failure — the pool
+                // classifier must not cool a healthy key or pay for a second
+                // generation because a signed URL expired.
+                return Err(format!("image download failed with status {status}"));
             }
             if let Some(parent) = output_path.parent() {
                 std::fs::create_dir_all(parent)

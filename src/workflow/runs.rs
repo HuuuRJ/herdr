@@ -101,6 +101,10 @@ pub(crate) struct NodeMeta {
     pub tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<String>,
+    /// Pool dispatch trace for pool-bound nodes, e.g. `pa(HTTP 401)→pb(ok)`
+    /// (P3c). Absent for direct-bound and unbound nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_attempts: Option<String>,
 }
 
 pub(crate) fn runs_root() -> PathBuf {

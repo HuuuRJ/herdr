@@ -52,12 +52,15 @@ pub struct ProviderApiRequest {
 
 /// Result of a background workflow node (invisible agent process or an
 /// image generation): the final answer text plus cache metadata, or the
-/// failure message.
+/// failure message. Pool-bound image generations fill `pool_attempts` with
+/// the full in-thread chain (P3c); agent nodes keep their chain App-side and
+/// send it empty.
 #[derive(Debug)]
 pub struct WorkflowNodeFinished {
     pub run_id: String,
     pub node_id: String,
     pub result: Result<(String, crate::workflow::runs::NodeMeta), String>,
+    pub pool_attempts: Vec<crate::workflow::pool::PoolAttempt>,
 }
 
 /// Delivered by the background provider HTTP thread (connectivity test or

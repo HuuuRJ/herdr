@@ -47,6 +47,11 @@ pub struct WorkflowNodePatch {
     /// Bound provider profile id; an empty string clears the binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_profile_id: Option<String>,
+    /// Bound provider pool (implicit group: profiles sharing a preset, or a
+    /// custom relay's own id); an empty string clears the binding. Setting a
+    /// non-empty pool clears a direct profile binding (mutually exclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_pool: Option<String>,
     /// Model id; an empty string clears it (falls back to the profile's
     /// first visible model).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -106,9 +106,7 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
                         '"' => break,
                         '\\' => {
                             let Some(&escaped) = chars.get(index) else {
-                                return Err(
-                                    "unterminated escape in when expression".to_string()
-                                );
+                                return Err("unterminated escape in when expression".to_string());
                             };
                             index += 1;
                             text.push(match escaped {
@@ -243,14 +241,12 @@ impl Parser {
 
     fn equality(&mut self) -> Result<Value, String> {
         let mut left = self.comparison()?;
-        loop {
-            let op = match self.peek_op() {
-                Some("==" | "!=") => self.tokens[self.position].clone(),
-                _ => break,
+        while self.peek_op().is_some_and(|op| matches!(op, "==" | "!=")) {
+            let Token::Op(op) = self.tokens[self.position].clone() else {
+                unreachable!("peek_op matched an operator token")
             };
             self.position += 1;
             let right = self.comparison()?;
-            let Token::Op(op) = op else { unreachable!("matched above") };
             let equal = match (&left, &right) {
                 (Value::Str(a), Value::Str(b)) => a == b,
                 (Value::Num(a), Value::Num(b)) => a == b,
@@ -266,14 +262,15 @@ impl Parser {
 
     fn comparison(&mut self) -> Result<Value, String> {
         let mut left = self.additive()?;
-        loop {
-            let op = match self.peek_op() {
-                Some("<" | "<=" | ">" | ">=") => self.tokens[self.position].clone(),
-                _ => break,
+        while self
+            .peek_op()
+            .is_some_and(|op| matches!(op, "<" | "<=" | ">" | ">="))
+        {
+            let Token::Op(op) = self.tokens[self.position].clone() else {
+                unreachable!("peek_op matched an operator token")
             };
             self.position += 1;
             let right = self.additive()?;
-            let Token::Op(op) = op else { unreachable!("matched above") };
             // Outputs arrive as text, so a number literal next to an output
             // reference coerces the text to a number; unparseable fails
             // loudly. Equality stays strict ("3" != 3).
@@ -303,22 +300,18 @@ impl Parser {
 
     fn additive(&mut self) -> Result<Value, String> {
         let mut left = self.multiplicative()?;
-        loop {
-            let op = match self.peek_op() {
-                Some("+" | "-") => self.tokens[self.position].clone(),
-                _ => break,
+        while self.peek_op().is_some_and(|op| matches!(op, "+" | "-")) {
+            let Token::Op(op) = self.tokens[self.position].clone() else {
+                unreachable!("peek_op matched an operator token")
             };
             self.position += 1;
             let right = self.multiplicative()?;
-            let Token::Op(op) = op else { unreachable!("matched above") };
             left = match (&left, &right, op) {
                 (Value::Num(a), Value::Num(b), "+") => Value::Num(a + b),
                 (Value::Num(a), Value::Num(b), "-") => Value::Num(a - b),
                 // '+' on anything else concatenates the display forms.
                 (_, _, "+") => Value::Str(format!("{}{}", left.display(), right.display())),
-                (_, _, _) => {
-                    return Err("'-' needs two numbers in when expression".to_string())
-                }
+                (_, _, _) => return Err("'-' needs two numbers in when expression".to_string()),
             };
         }
         Ok(left)
@@ -326,14 +319,15 @@ impl Parser {
 
     fn multiplicative(&mut self) -> Result<Value, String> {
         let mut left = self.unary()?;
-        loop {
-            let op = match self.peek_op() {
-                Some("*" | "/" | "%") => self.tokens[self.position].clone(),
-                _ => break,
+        while self
+            .peek_op()
+            .is_some_and(|op| matches!(op, "*" | "/" | "%"))
+        {
+            let Token::Op(op) = self.tokens[self.position].clone() else {
+                unreachable!("peek_op matched an operator token")
             };
             self.position += 1;
             let right = self.unary()?;
-            let Token::Op(op) = op else { unreachable!("matched above") };
             let (Value::Num(a), Value::Num(b)) = (&left, &right) else {
                 return Err(format!("'{op}' needs two numbers in when expression"));
             };
@@ -396,7 +390,10 @@ impl Parser {
 pub(crate) fn evaluate_when(expr: &str, outputs: &HashMap<String, String>) -> Result<bool, String> {
     let substituted = substitute_refs(expr, outputs)?;
     let tokens = lex(&substituted)?;
-    let mut parser = Parser { tokens, position: 0 };
+    let mut parser = Parser {
+        tokens,
+        position: 0,
+    };
     let value = parser.ternary()?;
     if parser.position != parser.tokens.len() {
         return Err("trailing tokens after when expression".to_string());
@@ -425,7 +422,10 @@ pub(crate) fn validate_when_syntax(expr: &str) -> Result<(), String> {
     }
     dummy.push_str(rest);
     let tokens = lex(&dummy)?;
-    let mut parser = Parser { tokens, position: 0 };
+    let mut parser = Parser {
+        tokens,
+        position: 0,
+    };
     parser.ternary()?;
     if parser.position != parser.tokens.len() {
         return Err("trailing tokens after when expression".to_string());
@@ -513,10 +513,6 @@ mod tests {
     #[test]
     fn escapes_survive_substitution() {
         let outs = outputs(&[("a", "line1\nline2 \"quoted\"")]);
-        assert!(evaluate_when(
-            r#"{{a.output}} == "line1\nline2 \"quoted\"""#,
-            &outs
-        )
-        .unwrap());
+        assert!(evaluate_when(r#"{{a.output}} == "line1\nline2 \"quoted\"""#, &outs).unwrap());
     }
 }

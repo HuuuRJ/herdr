@@ -18,9 +18,10 @@ use crate::app::state::{
 use crate::workflow::graph::{self, CARD_HEIGHT, ROW_PITCH};
 
 const INSPECTOR_WIDTH: u16 = 64;
-const INSPECTOR_FIELDS: [&str; 6] = [
+const INSPECTOR_FIELDS: [&str; 7] = [
     "runtime",
     "profile",
+    "pool",
     "model",
     "timeout_ms",
     "visible",
@@ -371,6 +372,12 @@ fn status_line(
         "error" => spans.push(Span::styled("✗", Style::default().fg(p.red))),
         _ => spans.push(Span::styled("·", Style::default().fg(p.overlay0))),
     }
+    // Pool badge (P3c): the node schedules across a profile group with
+    // failover; the inspector names the pool. Kept to one glyph so narrow
+    // cards keep their cost/tail suffixes.
+    if node.provider_pool.is_some() {
+        spans.push(Span::styled(" ⧉", Style::default().fg(p.overlay0)));
+    }
     if let Some(cost) = node.cost_usd {
         spans.push(Span::styled(
             format!(" {cost:.2}¢"),
@@ -490,6 +497,9 @@ fn render_inspector(
         node.profile_id
             .clone()
             .unwrap_or_else(|| "(unbound)".into()),
+        node.provider_pool
+            .clone()
+            .unwrap_or_else(|| "(unbound)".into()),
         node.model.clone().unwrap_or_else(|| "—".into()),
         if node.timeout_ms == 0 {
             "0 (none)".to_string()
@@ -507,7 +517,7 @@ fn render_inspector(
         } else {
             Style::default().fg(p.text)
         };
-        let cache_note = if selected && matches!(*field, "runtime" | "profile" | "model") {
+        let cache_note = if selected && matches!(*field, "runtime" | "profile" | "pool" | "model") {
             Span::styled("  (resets cache)", Style::default().fg(p.yellow))
         } else {
             Span::raw("")
@@ -548,6 +558,7 @@ mod tests {
             kind: "agent".to_string(),
             runtime: Some(runtime.to_string()),
             profile_id: None,
+            provider_pool: None,
             model: None,
             visible: true,
             enabled: true,
@@ -653,7 +664,41 @@ mod tests {
             text.contains("⊘ skipped (upstream_error)"),
             "skip marker carries its reason, got: {text}"
         );
-        assert!(text.contains("partial_fail"), "run banner shows partial_fail");
+        assert!(
+            text.contains("partial_fail"),
+            "run banner shows partial_fail"
+        );
+    }
+
+    #[test]
+    fn pool_bound_node_renders_badge() {
+        let mut app = AppState::test_new();
+        let mut pooled = node("alpha", "claude-code");
+        // A long model widens the card so the badge is not clipped.
+        pooled.model = Some("claude-sonnet-4-5-20250929".to_string());
+        pooled.provider_pool = Some("kimi".to_string());
+        app.workflow_view.open = Some(WorkflowGraphSnapshot {
+            run_id: "r1".to_string(),
+            workflow_name: "t".to_string(),
+            path: "/t.aflow.json".to_string(),
+            status: "done".to_string(),
+            live: false,
+            workspace_idx: None,
+            nodes: vec![pooled],
+            edges: Vec::new(),
+        });
+        app.workflow_view.selection = 0;
+        app.mode = Mode::WorkflowGraph;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 40));
+        let mut terminal = TestTerminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render_workflow_graph_overlay(&app, frame))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer()).join("\n");
+        assert!(
+            text.contains("✓ ⧉"),
+            "pool-bound done node carries the pool badge, got: {text}"
+        );
     }
 
     #[test]

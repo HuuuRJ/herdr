@@ -123,13 +123,14 @@ fn workflow_delete(args: &[String]) -> std::io::Result<i32> {
 
 fn workflow_bind(args: &[String]) -> std::io::Result<i32> {
     let usage = "herdr workflow bind <path.aflow.json> --node <id> [--runtime <r>] \
-                 [--profile <id>] [--model <m>] [--timeout-ms <n>] \
+                 [--profile <id>] [--pool <group>] [--model <m>] [--timeout-ms <n>] \
                  [--visible|--invisible] [--enable|--disable]";
     let mut path = None;
     let mut patch = WorkflowNodePatch {
         node_id: String::new(),
         runtime: None,
         provider_profile_id: None,
+        provider_pool: None,
         model: None,
         timeout_ms: None,
         visible: None,
@@ -166,6 +167,10 @@ fn workflow_bind(args: &[String]) -> std::io::Result<i32> {
             },
             "--profile" => match value("--profile") {
                 Ok(profile) => patch.provider_profile_id = Some(profile),
+                Err(()) => return Ok(2),
+            },
+            "--pool" => match value("--pool") {
+                Ok(pool) => patch.provider_pool = Some(pool),
                 Err(()) => return Ok(2),
             },
             "--model" => match value("--model") {
@@ -221,6 +226,6 @@ fn print_workflow_help() {
     eprintln!("  herdr workflow delete <run_id>");
     eprintln!(
         "  herdr workflow bind <path.aflow.json> --node <id> [--runtime <r>] [--profile <id>] \
-         [--model <m>] [--timeout-ms <n>] [--visible|--invisible] [--enable|--disable]"
+         [--pool <group>] [--model <m>] [--timeout-ms <n>] [--visible|--invisible] [--enable|--disable]"
     );
 }

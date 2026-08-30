@@ -1530,6 +1530,9 @@ pub(crate) struct WorkflowNodeView {
     pub kind: String,
     pub runtime: Option<String>,
     pub profile_id: Option<String>,
+    /// Bound provider pool (P3c) — set when the node schedules across a
+    /// profile group instead of a single direct binding.
+    pub provider_pool: Option<String>,
     pub model: Option<String>,
     pub visible: bool,
     pub enabled: bool,
@@ -1617,6 +1620,7 @@ pub(crate) struct WorkflowInspectorEdit {
 pub(crate) enum WorkflowInspectorField {
     Runtime,
     Profile,
+    Pool,
     Model,
     TimeoutMs,
     Visible,
@@ -1628,6 +1632,7 @@ impl WorkflowInspectorField {
         match self {
             Self::Runtime => "runtime",
             Self::Profile => "profile",
+            Self::Pool => "pool",
             Self::Model => "model",
             Self::TimeoutMs => "timeout_ms",
             Self::Visible => "visible",
@@ -1637,7 +1642,10 @@ impl WorkflowInspectorField {
 
     /// Cache-invalidating edits re-run the node on the next run/resume.
     pub(crate) fn invalidates_cache(self) -> bool {
-        matches!(self, Self::Runtime | Self::Profile | Self::Model)
+        matches!(
+            self,
+            Self::Runtime | Self::Profile | Self::Pool | Self::Model
+        )
     }
 }
 
@@ -1658,6 +1666,8 @@ pub(crate) struct WorkflowInspectorState {
     pub choice: Option<WorkflowInspectorChoice>,
     /// Masked provider profiles for the profile picker.
     pub profiles: Vec<crate::api::schema::ProviderProfileInfo>,
+    /// Pool group names for the pool picker (P3c).
+    pub pools: Vec<String>,
 }
 
 /// Projection target for the graph view and sidebar runs strip. Refreshed

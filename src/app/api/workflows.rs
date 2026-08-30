@@ -182,7 +182,7 @@ fn apply_workflow_patches(
                 }
             })
         };
-        let assignments: [(&str, Option<serde_json::Value>); 6] = [
+        let assignments: [(&str, Option<serde_json::Value>); 7] = [
             (
                 "runtime",
                 patch.runtime.clone().map(serde_json::Value::String),
@@ -191,6 +191,7 @@ fn apply_workflow_patches(
                 "provider_profile_id",
                 optional_binding(&patch.provider_profile_id),
             ),
+            ("provider_pool", optional_binding(&patch.provider_pool)),
             ("model", optional_binding(&patch.model)),
             (
                 "timeout_ms",
@@ -201,6 +202,24 @@ fn apply_workflow_patches(
             ("visible", patch.visible.map(serde_json::Value::Bool)),
             ("enabled", patch.enabled.map(serde_json::Value::Bool)),
         ];
+        let mut cleared: &[&str] = &[];
+        // Pool and direct binding are mutually exclusive: applying a
+        // non-empty one clears the other so a single patch is enough —
+        // INCLUDING a patch that sets both (assignments run first, the
+        // loser is removed after).
+        if patch
+            .provider_pool
+            .as_deref()
+            .is_some_and(|pool| !pool.is_empty())
+        {
+            cleared = &["provider_profile_id"];
+        } else if patch
+            .provider_profile_id
+            .as_deref()
+            .is_some_and(|profile| !profile.is_empty())
+        {
+            cleared = &["provider_pool"];
+        }
         for (field, value) in assignments {
             if let Some(value) = value {
                 if value.is_null() {
@@ -209,6 +228,9 @@ fn apply_workflow_patches(
                     obj.insert(field.to_string(), value);
                 }
             }
+        }
+        for field in cleared {
+            obj.remove(*field);
         }
     }
     Ok(())
@@ -245,6 +267,7 @@ mod tests {
             node_id: node_id.to_string(),
             runtime: None,
             provider_profile_id: None,
+            provider_pool: None,
             model: None,
             timeout_ms: None,
             visible: None,
@@ -280,6 +303,57 @@ mod tests {
         let mut clear = patch("a");
         clear.provider_profile_id = Some(String::new());
         apply_workflow_patches(&mut root, &[clear]).unwrap();
+        assert!(root["nodes"][0].get("provider_profile_id").is_none());
+    }
+
+    #[test]
+    fn pool_and_profile_bindings_clear_each_other() {
+        let mut root: serde_json::Value = serde_json::from_str(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "agent", "runtime": "claude-code", "prompt": "p",
+                 "provider_profile_id": "p123"}
+            ]}"#,
+        )
+        .unwrap();
+        let mut pool = patch("a");
+        pool.provider_pool = Some("kimi".to_string());
+        apply_workflow_patches(&mut root, &[pool]).unwrap();
+        assert_eq!(root["nodes"][0]["provider_pool"], "kimi");
+        assert!(
+            root["nodes"][0].get("provider_profile_id").is_none(),
+            "binding a pool clears the direct profile"
+        );
+
+        // Binding a profile back clears the pool the same way.
+        let mut direct = patch("a");
+        direct.provider_profile_id = Some("p456".to_string());
+        apply_workflow_patches(&mut root, &[direct]).unwrap();
+        assert_eq!(root["nodes"][0]["provider_profile_id"], "p456");
+        assert!(root["nodes"][0].get("provider_pool").is_none());
+
+        // Clearing with an empty string just removes the field.
+        let mut clear = patch("a");
+        clear.provider_pool = Some(String::new());
+        apply_workflow_patches(&mut root, &[clear]).unwrap();
+        assert!(root["nodes"][0].get("provider_pool").is_none());
+    }
+
+    #[test]
+    fn a_patch_setting_both_bindings_keeps_only_the_pool() {
+        // The CLI accepts --pool and --profile together; the patch must
+        // resolve the conflict itself (pool wins) instead of leaving a file
+        // validate() rejects.
+        let mut root: serde_json::Value = serde_json::from_str(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "agent", "runtime": "claude-code", "prompt": "p"}
+            ]}"#,
+        )
+        .unwrap();
+        let mut both = patch("a");
+        both.provider_pool = Some("kimi".to_string());
+        both.provider_profile_id = Some("p1".to_string());
+        apply_workflow_patches(&mut root, &[both]).unwrap();
+        assert_eq!(root["nodes"][0]["provider_pool"], "kimi");
         assert!(root["nodes"][0].get("provider_profile_id").is_none());
     }
 
