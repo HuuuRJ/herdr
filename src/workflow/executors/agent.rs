@@ -296,11 +296,21 @@ pub(crate) fn dsh_env(
     profile: &ProviderProfile,
     sanitized_profile_key: &str,
     permission: Option<PermissionLevel>,
+    home_dir: &Path,
 ) -> Vec<(String, String)> {
-    let mut env = vec![(
-        format!("AF_KEY_{sanitized_profile_key}"),
-        profile.api_key.clone(),
-    )];
+    let mut env = vec![
+        (
+            format!("AF_KEY_{sanitized_profile_key}"),
+            profile.api_key.clone(),
+        ),
+        // Without DSH_HOME the CLI reads ~/.dsh and never sees the staged
+        // settings.yaml (field-verified: MISSING_CREDENTIAL with the file
+        // sitting unused in the node directory).
+        (
+            "DSH_HOME".to_string(),
+            home_dir.to_string_lossy().into_owned(),
+        ),
+    ];
     if let Some(mode) = permission.and_then(PermissionLevel::dsh_env) {
         env.push(("DSH_PERMISSION_MODE".to_string(), mode.to_string()));
     }
@@ -974,7 +984,12 @@ mod tests {
             Some("1")
         );
 
-        let dsh = dsh_env(&openai, "p1", Some(PermissionLevel::Full));
+        let dsh = dsh_env(
+            &openai,
+            "p1",
+            Some(PermissionLevel::Full),
+            Path::new("/run/nodes/d/.af-dsh-home"),
+        );
         let dsh_map: HashMap<_, _> = dsh.iter().cloned().collect();
         assert_eq!(dsh_map.get("AF_KEY_p1").map(String::as_str), Some("sk-x"));
         assert_eq!(
@@ -982,9 +997,18 @@ mod tests {
             Some("danger-full-access")
         );
         // Workspace tier sets nothing (headless default is workspace-write).
-        assert!(dsh_env(&openai, "p1", Some(PermissionLevel::Workspace))
+        let workspace = dsh_env(
+            &openai,
+            "p1",
+            Some(PermissionLevel::Workspace),
+            Path::new("/run/nodes/d/.af-dsh-home"),
+        );
+        assert!(workspace
             .iter()
             .all(|(key, _)| key != "DSH_PERMISSION_MODE"));
+        assert!(dsh
+            .iter()
+            .any(|(key, value)| key == "DSH_HOME" && value == "/run/nodes/d/.af-dsh-home"));
     }
 
     #[test]

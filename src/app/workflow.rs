@@ -558,6 +558,7 @@ impl crate::app::App {
                         profile,
                         sanitized_key.as_deref().unwrap_or_default(),
                         node.permission,
+                        &home,
                     ));
                 }
                 _ => {}
