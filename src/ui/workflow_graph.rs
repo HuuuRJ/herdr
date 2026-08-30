@@ -57,6 +57,20 @@ pub(super) fn render_workflow_graph_overlay(app: &AppState, frame: &mut Frame) {
 
     let done = snapshot.nodes.iter().filter(|n| n.phase == "done").count();
     let (status_color, status_label) = run_status_style(&snapshot.status);
+    // Position among openable runs: Tab/Shift+Tab cycling needs a visible
+    // "where am I" cue because same-named runs render identical graphs.
+    let openable: Vec<&String> = app
+        .workflow_view
+        .runs
+        .iter()
+        .filter(|run| run.path_valid)
+        .map(|run| &run.run_id)
+        .collect();
+    let position = openable
+        .iter()
+        .position(|run_id| *run_id == &snapshot.run_id)
+        .map(|index| format!(" · [{}/{}]", index + 1, openable.len()))
+        .unwrap_or_default();
     let spans = vec![
         Span::styled(
             format!(" wf:{}", snapshot.workflow_name),
@@ -66,7 +80,7 @@ pub(super) fn render_workflow_graph_overlay(app: &AppState, frame: &mut Frame) {
         Span::styled(status_label, Style::default().fg(status_color)),
         Span::styled(
             format!(
-                " · {done}/{} {} · {}",
+                "{position} · {done}/{} {} · {}",
                 snapshot.nodes.len(),
                 if snapshot.live { "live" } else { "history" },
                 snapshot.run_id
