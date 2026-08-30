@@ -57,7 +57,14 @@ impl crate::app::App {
     // -- lifecycle -----------------------------------------------------------
 
     pub(crate) fn start_workflow_run(&mut self, path: &str) -> Result<String, String> {
-        let text = std::fs::read_to_string(path)
+        // Resolve once against the server cwd: CLI clients send paths
+        // relative to their own shell, and the stored workflow_path is
+        // re-read on resume (it must survive either cwd).
+        let path = std::path::absolute(path)
+            .map_err(|err| format!("invalid workflow path {path}: {err}"))?
+            .to_string_lossy()
+            .into_owned();
+        let text = std::fs::read_to_string(&path)
             .map_err(|err| format!("failed to read workflow file {path}: {err}"))?;
         let def = WorkflowDef::parse(&text)?;
         let run_id = runs::generate_run_id();

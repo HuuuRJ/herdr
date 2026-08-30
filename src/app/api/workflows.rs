@@ -214,6 +214,13 @@ fn apply_workflow_patches(
 }
 
 fn update_workflow_file(path: &str, patches: &[WorkflowNodePatch]) -> Result<(), String> {
+    // Same cwd rule as workflow.run: resolve client-relative paths against
+    // the server cwd.
+    let owned_path = std::path::absolute(path)
+        .map_err(|err| format!("invalid workflow path {path}: {err}"))?
+        .to_string_lossy()
+        .into_owned();
+    let path = owned_path.as_str();
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read workflow file {path}: {err}"))?;
     let mut root: serde_json::Value =
