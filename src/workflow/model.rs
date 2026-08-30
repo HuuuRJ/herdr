@@ -109,6 +109,12 @@ pub(crate) struct WorkflowNode {
     /// Run in a visible pane (true) or a background process (false).
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// Branch gate (P3 control flow): a JS-subset expression over upstream
+    /// `{{id.output}}` refs, evaluated when the node becomes ready. False →
+    /// skipped (reason `when_false: …`), downstream cascades. Malformed
+    /// expressions fail the node at dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
     /// Disabled nodes are structurally skipped: empty output port, no spawn;
     /// the engine cascades the skip downstream.
     #[serde(default = "default_true")]
@@ -233,6 +239,14 @@ impl WorkflowDef {
                 } else if !ids.contains(&dep.as_str()) {
                     errors.push(format!(
                         "node '{}' references unknown dependency '{dep}'",
+                        node.id
+                    ));
+                }
+            }
+            if let Some(when) = &node.when {
+                if let Err(err) = crate::workflow::expr::validate_when_syntax(when) {
+                    errors.push(format!(
+                        "node '{}' has an invalid when expression: {err}",
                         node.id
                     ));
                 }
@@ -444,14 +458,15 @@ impl WorkflowDef {
     }
 }
 
-/// `{{node_id.output}}` references inside an agent prompt, template, or
-/// custom command.
+/// `{{node_id.output}}` references inside an agent prompt, template, custom
+/// command, or `when` gate.
 pub(crate) fn template_references(node: &WorkflowNode) -> Vec<String> {
     let mut references = Vec::new();
     for text in [
         node.prompt.as_deref().unwrap_or(""),
         node.template.as_deref().unwrap_or(""),
         node.custom_command.as_deref().unwrap_or(""),
+        node.when.as_deref().unwrap_or(""),
     ] {
         let mut rest = text;
         while let Some(start) = rest.find("{{") {
@@ -710,8 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_on_error_defaults_false_and_participates_in_cache_hash() {
-        let base: WorkflowNode = serde_json::from_str(
+    fn skip_on_error_defaults_false_and_participates_in_cache_hash() {        let base: WorkflowNode = serde_json::from_str(
             &(node_json("a", "agent").trim_end_matches('}').to_string()
                 + r#", "runtime": "claude-code", "prompt": "p"}"#),
         )
@@ -735,6 +749,60 @@ mod tests {
         assert!(
             !projection.contains("skip_on_error"),
             "false must not leak into the cache projection: {projection}"
+        );
+    }
+
+    #[test]
+    fn when_gate_validates_syntax_and_upstream_refs() {
+        // Good: refs upstream, expression parses.
+        WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "prompt_template", "template": "yes"},
+                {"id": "b", "type": "prompt_template", "template": "b", "after": ["a"],
+                 "when": "{{a.output}} == \"yes\""}
+            ]}"#,
+        )
+        .unwrap();
+
+        // Bad syntax.
+        let errors = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "b", "type": "prompt_template", "template": "b",
+                 "when": "1 +"}
+            ]}"#,
+        )
+        .unwrap_err();
+        assert!(errors.contains("invalid when expression"), "{errors}");
+
+        // Non-upstream reference.
+        let errors = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "prompt_template", "template": "later"},
+                {"id": "b", "type": "prompt_template", "template": "b",
+                 "when": "{{a.output}} == \"x\""}
+            ]}"#,
+        )
+        .unwrap_err();
+        assert!(errors.contains("does not depend on 'a'"), "{errors}");
+    }
+
+    #[test]
+    fn when_participates_in_cache_hash() {
+        let base: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "prompt_template").trim_end_matches('}').to_string()
+                + r#", "template": "t"}"#),
+        )
+        .unwrap();
+        let gated: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "prompt_template").trim_end_matches('}').to_string()
+                + r#", "template": "t", "when": "1 == 1"}"#),
+        )
+        .unwrap();
+        assert!(gated.when.is_some());
+        assert_ne!(
+            base.cache_projection(),
+            gated.cache_projection(),
+            "editing when must invalidate the node cache key"
         );
     }
 }

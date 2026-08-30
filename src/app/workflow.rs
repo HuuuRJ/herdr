@@ -394,6 +394,28 @@ impl crate::app::App {
             self.skip_workflow_node(run_id, &node.id, "disabled");
             return true;
         }
+        // Branch gate (P3 control flow): `when` is evaluated once all deps
+        // are Done. False prunes the branch (Skipped, downstream cascades);
+        // a malformed expression is a node-fatal configuration failure.
+        if let Some(when) = node.when.clone() {
+            let verdict = {
+                let Some(live) = self.workflow_runs.get(run_id) else {
+                    return false;
+                };
+                crate::workflow::expr::evaluate_when(&when, &live.engine.outputs)
+            };
+            match verdict {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.skip_workflow_node(run_id, &node.id, &format!("when_false: {when}"));
+                    return true;
+                }
+                Err(err) => {
+                    self.fail_workflow_node(run_id, &node.id, err);
+                    return false;
+                }
+            }
+        }
         match node.node_type {
             NodeType::PromptTemplate => self.dispatch_template_node(run_id, &node),
             NodeType::ImageGen => self.dispatch_image_node(run_id, &node),
