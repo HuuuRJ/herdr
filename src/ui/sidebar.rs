@@ -1068,10 +1068,17 @@ fn render_workflow_runs_strip(app: &AppState, frame: &mut Frame, area: Rect) {
             "error" => ("✗", p.red),
             _ => ("·", p.overlay0),
         };
+        // Historical runs whose workflow file vanished cannot open a graph;
+        // dim them so the strip explains itself.
+        let title_style = if run.path_valid {
+            Style::default().fg(p.text)
+        } else {
+            Style::default().fg(p.overlay0)
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!(" {dot} "), Style::default().fg(color)),
-                Span::styled(run.workflow_name.clone(), Style::default().fg(p.text)),
+                Span::styled(run.workflow_name.clone(), title_style),
                 Span::styled(
                     format!(" {}/{}", run.done_count, run.total_nodes),
                     Style::default().fg(p.overlay0),

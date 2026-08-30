@@ -296,7 +296,8 @@ fn enter_action(state: &mut AppState) -> Option<WorkflowGraphAction> {
     None
 }
 
-/// Cycle to the previous/next run in the sidebar list (wraps).
+/// Cycle to the previous/next openable run in the sidebar list (wraps;
+/// historical runs whose workflow file vanished are skipped).
 fn cycle_run(state: &mut AppState, direction: isize) -> Option<WorkflowGraphAction> {
     let view = &state.workflow_view;
     let runs = &view.runs;
@@ -305,9 +306,16 @@ fn cycle_run(state: &mut AppState, direction: isize) -> Option<WorkflowGraphActi
     }
     let current = view.open.as_ref().map(|snapshot| &snapshot.run_id)?;
     let index = runs.iter().position(|run| &run.run_id == current)?;
-    let next = (index as isize + direction).rem_euclid(runs.len() as isize) as usize;
-    let run_id = runs[next].run_id.clone();
-    Some(WorkflowGraphAction::SwitchRun { run_id })
+    for step in 1..runs.len() {
+        let candidate =
+            (index as isize + direction * step as isize).rem_euclid(runs.len() as isize) as usize;
+        if runs[candidate].path_valid {
+            let run_id = runs[candidate].run_id.clone();
+            return Some(WorkflowGraphAction::SwitchRun { run_id });
+        }
+    }
+    state.workflow_view.notice = Some("no other runs with an existing workflow file".to_string());
+    None
 }
 
 fn toggle_pause(state: &mut AppState) -> Option<WorkflowGraphAction> {
@@ -820,15 +828,33 @@ mod tests {
     fn angle_brackets_cycle_runs_with_wraparound() {
         use crate::app::state::WorkflowRunSummary;
         let mut state = view_state_open();
-        let summary = |run_id: &str| WorkflowRunSummary {
+        let summary = |run_id: &str, path_valid: bool| WorkflowRunSummary {
             run_id: run_id.to_string(),
             workflow_name: format!("wf-{run_id}"),
             status: "done".to_string(),
             started_unix: 0,
             done_count: 1,
             total_nodes: 1,
+            path_valid,
         };
-        state.workflow_view.runs = vec![summary("r0"), summary("r1"), summary("r2")];
+        // r2's workflow file is gone: > must skip it and wrap to r0... wait,
+        // r0 sits before r1; with r2 invalid, > from r1 wraps past r2 to r0.
+        state.workflow_view.runs = vec![
+            summary("r0", true),
+            summary("r1", true),
+            summary("r2", false),
+        ];
+        match update_workflow_graph_state(&mut state, key(KeyCode::Char('>'))) {
+            Some(WorkflowGraphAction::SwitchRun { run_id }) => {
+                assert_eq!(run_id, "r0", "invalid runs are skipped")
+            }
+            other => panic!("expected switch, got {other:?}"),
+        }
+        state.workflow_view.runs = vec![
+            summary("r0", true),
+            summary("r1", true),
+            summary("r2", true),
+        ];
         // The open snapshot is run "r1" (index 1): > goes to r2, < wraps to r0.
         match update_workflow_graph_state(&mut state, key(KeyCode::Char('>'))) {
             Some(WorkflowGraphAction::SwitchRun { run_id }) => assert_eq!(run_id, "r2"),

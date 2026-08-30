@@ -1218,17 +1218,23 @@ impl crate::app::App {
         records.sort_by_key(|record| std::cmp::Reverse(record.started_unix));
         self.state.workflow_view.runs = records
             .iter()
-            .map(|record| WorkflowRunSummary {
-                run_id: record.run_id.clone(),
-                workflow_name: record.workflow_name.clone(),
-                status: record.status.as_str().to_string(),
-                started_unix: record.started_unix,
-                done_count: record
-                    .nodes
-                    .iter()
-                    .filter(|node| node.phase == NodePhase::Done)
-                    .count(),
-                total_nodes: record.nodes.len(),
+            .map(|record| {
+                let live = self.workflow_runs.contains_key(&record.run_id);
+                WorkflowRunSummary {
+                    run_id: record.run_id.clone(),
+                    workflow_name: record.workflow_name.clone(),
+                    status: record.status.as_str().to_string(),
+                    started_unix: record.started_unix,
+                    done_count: record
+                        .nodes
+                        .iter()
+                        .filter(|node| node.phase == NodePhase::Done)
+                        .count(),
+                    total_nodes: record.nodes.len(),
+                    // Live runs carry their def in memory; historical runs
+                    // need the file on disk to open a graph.
+                    path_valid: live || std::path::Path::new(&record.workflow_path).exists(),
+                }
             })
             .collect();
 

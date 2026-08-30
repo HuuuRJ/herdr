@@ -1514,6 +1514,9 @@ pub(crate) struct WorkflowRunSummary {
     pub started_unix: u64,
     pub done_count: usize,
     pub total_nodes: usize,
+    /// The workflow file still exists (historical runs whose file vanished
+    /// cannot open a graph view).
+    pub path_valid: bool,
 }
 
 /// Projection of one node for the graph view / inspector. Built App-side
