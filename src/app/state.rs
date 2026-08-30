@@ -1526,7 +1526,7 @@ pub(crate) struct WorkflowRunSummary {
 pub(crate) struct WorkflowNodeView {
     pub id: String,
     pub title: String,
-    /// agent | prompt_template | image_gen
+    /// agent | prompt_template | image_gen | llm_chat
     pub kind: String,
     pub runtime: Option<String>,
     pub profile_id: Option<String>,
@@ -1547,6 +1547,9 @@ pub(crate) struct WorkflowNodeView {
     pub cost_usd: Option<f64>,
     pub tokens: Option<u64>,
     pub artifact: Option<String>,
+    /// Last lines of the node's `output.txt` (inspector tail, P3d Q7) — the
+    /// monitoring story for pane-less nodes. Read App-side; render stays pure.
+    pub output_tail: Option<String>,
     /// Pane currently bound to this node (live visible nodes only).
     pub pane: Option<PaneId>,
     /// herdr agent detection overlay (working/blocked/idle) for the bound
@@ -1590,7 +1593,10 @@ impl WorkflowGraphSnapshot {
                 meta: match (&node.runtime, &node.model) {
                     (Some(runtime), Some(model)) => format!("{runtime}·{model}"),
                     (Some(runtime), None) => runtime.clone(),
-                    (None, _) => node.kind.clone(),
+                    // Pane-less kinds (llm_chat/image_gen) have no runtime;
+                    // the model is their identity on the card.
+                    (None, Some(model)) => format!("{}·{model}", node.kind),
+                    (None, None) => node.kind.clone(),
                 },
                 sort_y: node.sort_y,
                 deps: self

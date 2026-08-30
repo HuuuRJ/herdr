@@ -206,6 +206,6 @@ pub enum AppEvent {
     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
     /// Background provider connectivity test / model fetch completed.
     ProviderHttpFinished(Box<ProviderHttpOutcome>),
-    /// Background workflow node (invisible agent / image_gen) completed.
+    /// Background workflow node (invisible agent / image_gen / llm_chat) completed.
     WorkflowNodeFinished(Box<WorkflowNodeFinished>),
 }

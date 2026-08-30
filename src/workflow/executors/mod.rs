@@ -2,4 +2,5 @@
 
 pub(crate) mod agent;
 pub(crate) mod image;
+pub(crate) mod llm;
 pub(crate) mod template;

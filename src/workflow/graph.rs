@@ -67,6 +67,10 @@ fn node_meta(node: &WorkflowNode) -> String {
         }
         NodeType::PromptTemplate => "template".to_string(),
         NodeType::ImageGen => "image".to_string(),
+        NodeType::LlmChat => match &node.model {
+            Some(model) => format!("llm·{model}"),
+            None => "llm".to_string(),
+        },
     }
 }
 

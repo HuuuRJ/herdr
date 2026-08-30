@@ -703,6 +703,7 @@ mod tests {
             cost_usd: None,
             tokens: None,
             artifact: None,
+            output_tail: None,
             pane: None,
             agent_state: None,
             sort_y: None,

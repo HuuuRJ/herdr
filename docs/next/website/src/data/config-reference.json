@@ -1427,6 +1427,12 @@
           "description": "Global cap on concurrently running workflow agent nodes across all runs."
         },
         {
+          "key": "workflow.max_concurrent_llm",
+          "type": "integer",
+          "default": "8",
+          "description": "Global cap on concurrently running workflow llm_chat nodes across all runs; a budget separate from max_concurrent_agents."
+        },
+        {
           "key": "workflow.keep_runs",
           "type": "integer",
           "default": "20",

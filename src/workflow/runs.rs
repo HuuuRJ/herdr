@@ -318,6 +318,50 @@ pub(crate) fn load_node_meta(run_id: &str, node_id: &str) -> Option<NodeMeta> {
     serde_json::from_str(&std::fs::read_to_string(dir.join("meta.json")).ok()?).ok()
 }
 
+/// Inspector tail budget (P3d Q7): last N lines of a node's `output.txt`.
+pub(crate) const OUTPUT_TAIL_LINES: usize = 10;
+
+/// Last lines of a Done node's `output.txt` — the monitoring story for
+/// pane-less nodes (llm_chat/image_gen). Reads only a small trailing window
+/// so large agent outputs stay cheap. Returns None when there is nothing to
+/// show yet (no file, empty).
+pub(crate) fn load_output_tail(run_id: &str, node_id: &str, max_lines: usize) -> Option<String> {
+    load_output_tail_at(&runs_root(), run_id, node_id, max_lines)
+}
+
+fn load_output_tail_at(
+    root: &Path,
+    run_id: &str,
+    node_id: &str,
+    max_lines: usize,
+) -> Option<String> {
+    use std::io::{Read as _, Seek as _};
+    const WINDOW_BYTES: u64 = 8 * 1024;
+    let mut file = std::fs::File::open(node_root_at(root, run_id, node_id).join("output.txt")).ok()?;
+    let size = file.metadata().ok()?.len();
+    let window = size.min(WINDOW_BYTES);
+    if file.seek(std::io::SeekFrom::Start(size - window)).is_err() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(window as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if window < size && !lines.is_empty() {
+        // The window's first line is likely cut mid-line.
+        lines.remove(0);
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    let joined = lines[start..].join("\n");
+    if joined.trim().is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 /// Delete runs beyond `keep` (oldest first). Returns removed
 /// `(run_id, workspace_id)` pairs — callers close the workspaces of runs
 /// whose directories just disappeared.
@@ -392,6 +436,28 @@ mod tests {
             ]}"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn output_tail_reads_last_lines() {
+        let root = temp_root("tail");
+        let dir = node_root_at(&root, "r1", "a");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("output.txt"),
+            "line 1\nline 2\nline 3\nline 4\n",
+        )
+        .unwrap();
+        // Last two lines only.
+        let tail = load_output_tail_at(&root, "r1", "a", 2).unwrap();
+        assert_eq!(tail, "line 3\nline 4");
+        // More budget than lines: everything (trailing newline not kept).
+        assert_eq!(load_output_tail_at(&root, "r1", "a", 10).unwrap(), "line 1\nline 2\nline 3\nline 4");
+        // Missing file / empty text → None.
+        assert!(load_output_tail_at(&root, "r1", "ghost", 5).is_none());
+        std::fs::write(dir.join("output.txt"), "   \n").unwrap();
+        assert!(load_output_tail_at(&root, "r1", "a", 5).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

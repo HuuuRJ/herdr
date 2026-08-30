@@ -20,6 +20,7 @@ pub(crate) enum NodeType {
     Agent,
     PromptTemplate,
     ImageGen,
+    LlmChat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +162,18 @@ pub(crate) struct WorkflowNode {
     pub size: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_file: Option<String>,
+
+    // -- llm_chat --
+    /// Optional system prompt (renders `{{id.output}}` refs like `prompt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    /// Sampling cap; unset = omitted from the request (FR-5.6), except
+    /// anthropic where the API requires it and a default is substituted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Unset = omitted from the request (FR-5.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -321,6 +334,18 @@ impl WorkflowDef {
                         errors.push(format!("image_gen node '{}' requires output_file", node.id));
                     }
                 }
+                // Empty model is a pre-flight error at the parse boundary so
+                // no request is ever sent without one (FR-3.8: 空模型双侧
+                // 前置报错——herdr folds both sides into WorkflowDef::parse,
+                // which every load and patch path funnels through).
+                NodeType::LlmChat => {
+                    if node.prompt.as_deref().unwrap_or("").trim().is_empty() {
+                        errors.push(format!("llm_chat node '{}' requires a prompt", node.id));
+                    }
+                    if node.model.as_deref().unwrap_or("").trim().is_empty() {
+                        errors.push(format!("llm_chat node '{}' requires a model", node.id));
+                    }
+                }
             }
             for reference in template_references(node) {
                 if reference == node.id {
@@ -470,7 +495,7 @@ impl WorkflowDef {
 }
 
 /// `{{node_id.output}}` references inside an agent prompt, template, custom
-/// command, or `when` gate.
+/// command, `when` gate, or llm_chat system prompt.
 pub(crate) fn template_references(node: &WorkflowNode) -> Vec<String> {
     let mut references = Vec::new();
     for text in [
@@ -478,6 +503,7 @@ pub(crate) fn template_references(node: &WorkflowNode) -> Vec<String> {
         node.template.as_deref().unwrap_or(""),
         node.custom_command.as_deref().unwrap_or(""),
         node.when.as_deref().unwrap_or(""),
+        node.system.as_deref().unwrap_or(""),
     ] {
         let mut rest = text;
         while let Some(start) = rest.find("{{") {
@@ -872,5 +898,58 @@ mod tests {
             gated.cache_projection(),
             "editing when must invalidate the node cache key"
         );
+    }
+
+    #[test]
+    fn llm_chat_needs_prompt_and_model() {
+        let errors = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [{"id": "a", "type": "llm_chat"}]}"#,
+        )
+        .unwrap_err();
+        assert!(errors.contains("requires a prompt"), "{errors}");
+        assert!(errors.contains("requires a model"), "{errors}");
+
+        WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "llm_chat", "prompt": "p", "model": "m"}
+            ]}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn llm_chat_fields_participate_in_cache_hash() {
+        let base: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "llm_chat").trim_end_matches('}').to_string()
+                + r#", "prompt": "p", "model": "m"}"#),
+        )
+        .unwrap();
+        for extra in ["system", "max_tokens", "temperature"] {
+            let suffix = match extra {
+                "system" => r#", "system": "s""#,
+                "max_tokens" => r#", "max_tokens": 128"#,
+                _ => r#", "temperature": 0.7"#,
+            };
+            let with_field: WorkflowNode = serde_json::from_str(
+                &(node_json("a", "llm_chat").trim_end_matches('}').to_string()
+                    + suffix
+                    + r#", "prompt": "p", "model": "m"}"#),
+            )
+            .unwrap();
+            assert_ne!(
+                base.cache_projection(),
+                with_field.cache_projection(),
+                "editing {extra} must invalidate the node cache key"
+            );
+        }
+        // Unset fields serialize away entirely: pre-P3d cache hashes stay
+        // byte-identical.
+        let projection = base.cache_projection().to_string();
+        for field in ["system", "max_tokens", "temperature"] {
+            assert!(
+                !projection.contains(field),
+                "unset {field} must not leak into the cache projection: {projection}"
+            );
+        }
     }
 }

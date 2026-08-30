@@ -844,6 +844,10 @@ pub struct WorkflowConfig {
     /// Global cap on concurrently running workflow agent nodes across all
     /// runs (agent requests cost real money).
     pub max_concurrent_agents: usize,
+    /// Global cap on concurrently running workflow llm_chat nodes across all
+    /// runs — a budget separate from the agent one (direct calls are cheaper
+    /// than whole agent CLIs, so the ceiling is higher).
+    pub max_concurrent_llm: usize,
     /// How many finished workflow runs to keep on disk (oldest pruned).
     pub keep_runs: usize,
 }
@@ -1113,6 +1117,7 @@ impl Default for WorkflowConfig {
     fn default() -> Self {
         Self {
             max_concurrent_agents: 3,
+            max_concurrent_llm: 8,
             keep_runs: 20,
         }
     }

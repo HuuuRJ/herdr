@@ -84,10 +84,11 @@ impl EngineRun {
         run
     }
 
-    /// Nodes whose dependencies are all Done and that may start now:
-    /// respects pause and the concurrency budget.
-    pub(crate) fn ready_nodes(&self, in_flight: usize, max_concurrent: usize) -> Vec<String> {
-        if self.status != RunStatus::Running || in_flight >= max_concurrent {
+    /// Nodes whose dependencies are all Done and that may start now;
+    /// respects pause. Concurrency budgeting lives in the App glue, which
+    /// owns per-kind in-flight counts (agents and llm_chat cap separately).
+    pub(crate) fn ready_nodes(&self) -> Vec<String> {
+        if self.status != RunStatus::Running {
             return Vec::new();
         }
         let mut ready: Vec<String> = self
@@ -114,7 +115,6 @@ impl EngineRun {
                 .position(|node| &node.id == id)
                 .unwrap_or(usize::MAX)
         });
-        ready.truncate(max_concurrent.saturating_sub(in_flight));
         ready
     }
 
@@ -418,23 +418,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_respects_dependencies_and_budget() {
+    fn dispatch_respects_dependencies() {
         let mut run = two_node_run();
         // Only "a" is ready initially.
-        assert_eq!(run.ready_nodes(0, 3), vec!["a"]);
+        assert_eq!(run.ready_nodes(), vec!["a"]);
         run.mark_running("a");
-        assert!(run.ready_nodes(1, 3).is_empty(), "b waits on a");
+        assert!(run.ready_nodes().is_empty(), "b waits on a");
 
         run.mark_done("a", "hello".to_string(), output_hash("hello"));
-        assert_eq!(run.ready_nodes(0, 3), vec!["b"]);
-
-        // Concurrency budget: one free slot still dispatches b; zero free
-        // slots dispatch nothing.
-        assert_eq!(run.ready_nodes(2, 3), vec!["b"]);
-        assert!(run.ready_nodes(3, 3).is_empty());
+        assert_eq!(run.ready_nodes(), vec!["b"]);
 
         run.mark_running("b");
-        assert!(run.ready_nodes(1, 3).is_empty());
+        assert!(run.ready_nodes().is_empty());
     }
 
     #[test]
@@ -460,7 +455,7 @@ mod tests {
         );
         assert_eq!(run.status, RunStatus::Error);
         // No further dispatch after failure.
-        assert!(run.ready_nodes(0, 3).is_empty());
+        assert!(run.ready_nodes().is_empty());
         assert!(run.nodes.get("a").unwrap().error.as_deref() == Some("exit 2"));
     }
 
@@ -469,9 +464,9 @@ mod tests {
         let mut run = two_node_run();
         run.pause();
         assert_eq!(run.status, RunStatus::Paused);
-        assert!(run.ready_nodes(0, 3).is_empty());
+        assert!(run.ready_nodes().is_empty());
         run.resume();
-        assert_eq!(run.ready_nodes(0, 3), vec!["a"]);
+        assert_eq!(run.ready_nodes(), vec!["a"]);
     }
 
     #[test]
@@ -481,7 +476,7 @@ mod tests {
         assert_eq!(run.status, RunStatus::Cancelled);
         run.cancel();
         assert_eq!(run.status, RunStatus::Cancelled);
-        assert!(run.ready_nodes(0, 3).is_empty());
+        assert!(run.ready_nodes().is_empty());
     }
 
     #[test]
@@ -489,7 +484,7 @@ mod tests {
         let mut run = two_node_run();
         run.mark_cached("a", "hello".to_string(), output_hash("hello"));
         assert!(run.nodes.get("a").unwrap().cached);
-        assert_eq!(run.ready_nodes(0, 3), vec!["b"]);
+        assert_eq!(run.ready_nodes(), vec!["b"]);
     }
 
     #[test]

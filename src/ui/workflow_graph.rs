@@ -481,8 +481,19 @@ fn render_inspector(
         node.kind,
         if snapshot.live { "live" } else { "history" }
     );
-    let height = 5 + INSPECTOR_FIELDS.len() as u16;
-    let Some(inner) = render_modal_shell(frame, area, INSPECTOR_WIDTH, height, p) else {
+    // Output tail (P3d Q7): the last lines of the node's output file, the
+    // monitoring story for pane-less nodes (llm_chat/image_gen).
+    let tail_lines: Vec<&str> = node
+        .output_tail
+        .as_deref()
+        .map(|tail| tail.lines().collect())
+        .unwrap_or_default();
+    let mut height = 5 + INSPECTOR_FIELDS.len() as u16;
+    if !tail_lines.is_empty() {
+        height += 1 + tail_lines.len() as u16;
+    }
+    let Some(inner) = render_modal_shell(frame, area, INSPECTOR_WIDTH, height.min(area.height), p)
+    else {
         return;
     };
     frame.render_widget(
@@ -531,6 +542,39 @@ fn render_inspector(
             Rect::new(inner.x, inner.y + 2 + index as u16, inner.width, 1),
         );
     }
+    if !tail_lines.is_empty() {
+        // Trim to what fits above the footer on short terminals (it's a
+        // tail — keep the END). fit == 0 means even the label has no row:
+        // skip the whole section rather than paint outside the modal.
+        let fit = (inner.height as usize).saturating_sub(2 + INSPECTOR_FIELDS.len() + 2);
+        if fit > 0 {
+            let start = tail_lines.len().saturating_sub(fit);
+            let label_row = Rect::new(
+                inner.x,
+                inner.y + 2 + INSPECTOR_FIELDS.len() as u16,
+                inner.width,
+                1,
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled(" output", Style::default().fg(p.overlay0))),
+                label_row,
+            );
+            for (index, line) in tail_lines[start..].iter().enumerate() {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!(" {line}"),
+                        Style::default().fg(p.text),
+                    )),
+                    Rect::new(
+                        inner.x,
+                        inner.y + 3 + INSPECTOR_FIELDS.len() as u16 + index as u16,
+                        inner.width,
+                        1,
+                    ),
+                );
+            }
+        }
+    }
     frame.render_widget(
         Paragraph::new(Span::styled(
             " enter edit · esc back (prompt text is edited in the file)",
@@ -570,10 +614,46 @@ mod tests {
             cost_usd: Some(0.12),
             tokens: Some(7),
             artifact: None,
+            output_tail: None,
             pane: None,
             agent_state: None,
             sort_y: None,
         }
+    }
+
+    #[test]
+    fn inspector_renders_output_tail() {
+        use crate::app::state::{SelectionListState, WorkflowInspectorState};
+        let mut app = AppState::test_new();
+        let mut with_tail = node("alpha", "claude-code");
+        with_tail.output_tail = Some("first line of tail\nthe final answer".to_string());
+        app.workflow_view.open = Some(WorkflowGraphSnapshot {
+            run_id: "r1".to_string(),
+            workflow_name: "t".to_string(),
+            path: "/t.aflow.json".to_string(),
+            status: "running".to_string(),
+            live: true,
+            workspace_idx: None,
+            nodes: vec![with_tail],
+            edges: vec![],
+        });
+        app.workflow_view.inspector = Some(WorkflowInspectorState {
+            node_id: "alpha".to_string(),
+            list: SelectionListState::new(0),
+            edit: None,
+            choice: None,
+            profiles: vec![],
+            pools: vec![],
+        });
+        app.mode = Mode::WorkflowGraph;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 40));
+        let mut terminal = TestTerminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render_workflow_graph_overlay(&app, frame))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer()).join("\n");
+        assert!(text.contains("the final answer"), "tail text rendered:\n{text}");
+        assert!(text.contains(" output"), "tail section label rendered:\n{text}");
     }
 
     fn draw_graph(

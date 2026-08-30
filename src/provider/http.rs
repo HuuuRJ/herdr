@@ -150,8 +150,11 @@ fn run_curl(
     }
 }
 
-/// JSON curl request for sibling subsystems (workflow image generation).
-/// Same conventions as `run_curl`; returns the parsed status with the body.
+/// JSON curl request for sibling subsystems (workflow image generation,
+/// llm_chat). Same conventions as `run_curl`; returns the parsed status with
+/// the body. `body` may be `"@path"` to stream the payload from a file —
+/// llm prompts embed upstream outputs and routinely exceed the Windows 32K
+/// command-line cap.
 pub(crate) fn provider_curl_json(
     url: &str,
     headers: &[(String, String)],
@@ -250,7 +253,7 @@ pub(crate) fn provider_curl_binary(
     }
 }
 
-fn auth_headers(protocol: ProviderProtocol, api_key: &str) -> Vec<(String, String)> {
+pub(crate) fn auth_headers(protocol: ProviderProtocol, api_key: &str) -> Vec<(String, String)> {
     match protocol {
         ProviderProtocol::OpenaiCompat => {
             vec![

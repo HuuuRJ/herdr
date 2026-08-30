@@ -136,10 +136,10 @@ pub struct App {
     /// attempted profile, cleared when the node settles.
     pub(crate) workflow_pool_attempts:
         HashMap<(String, String), Vec<crate::workflow::pool::PoolAttempt>>,
-    /// Cancellation flags for detached image-generation threads, keyed by run
-    /// id. Set when the run is cancelled/finished so a between-candidates
-    /// retry loop stops before paying for another generation.
-    pub(crate) workflow_image_cancel:
+    /// Cancellation flags for detached curl threads (image_gen and llm_chat),
+    /// keyed by run id. Set when the run is cancelled/finished so a
+    /// between-candidates retry loop stops before paying for another call.
+    pub(crate) workflow_curl_cancel:
         HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) pending_provider_requests: HashMap<String, u64>,
     pub(crate) next_provider_operation_id: u64,
@@ -802,7 +802,7 @@ impl App {
             workflow_limits: config.workflow,
             workflow_pool_health: crate::workflow::pool::PoolHealth::default(),
             workflow_pool_attempts: HashMap::new(),
-            workflow_image_cancel: HashMap::new(),
+            workflow_curl_cancel: HashMap::new(),
             pending_provider_requests: HashMap::new(),
             next_provider_operation_id: 1,
             provider_http_in_flight: 0,

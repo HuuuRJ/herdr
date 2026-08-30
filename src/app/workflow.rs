@@ -22,6 +22,7 @@ use crate::workflow::executors::agent::{
     shell_wrap_visible, unix_shell_quote, AgentCommand,
 };
 use crate::workflow::executors::image::run_image_gen;
+use crate::workflow::executors::llm;
 use crate::workflow::executors::template::render;
 use crate::workflow::graph;
 use crate::workflow::model::{AgentRuntime, NodeType, WorkflowDef, WorkflowNode};
@@ -278,9 +279,10 @@ impl crate::app::App {
             }
         }
         live.engine.cancel();
-        // Signal detached image threads before tearing down: their in-flight
-        // curl cannot be stopped, but the between-candidates retry can.
-        if let Some(flag) = self.workflow_image_cancel.remove(run_id) {
+        // Signal detached curl threads (image_gen/llm_chat) before tearing
+        // down: their in-flight request cannot be stopped, but the
+        // between-candidates retry can.
+        if let Some(flag) = self.workflow_curl_cancel.remove(run_id) {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.finish_workflow_run(run_id, RunStatus::Cancelled);
@@ -307,6 +309,16 @@ impl crate::app::App {
     // -- dispatch -------------------------------------------------------------
 
     fn workflow_agent_in_flight(&self) -> usize {
+        self.workflow_kind_in_flight(NodeType::Agent)
+    }
+
+    fn workflow_llm_in_flight(&self) -> usize {
+        self.workflow_kind_in_flight(NodeType::LlmChat)
+    }
+
+    /// Server-global count of Running nodes of one kind across all runs
+    /// (W7: budgets are shared across runs, not per-run).
+    fn workflow_kind_in_flight(&self, kind: NodeType) -> usize {
         self.workflow_runs
             .values()
             .flat_map(|live| {
@@ -318,7 +330,7 @@ impl crate::app::App {
                         live.engine
                             .def
                             .node(id)
-                            .is_some_and(|node| node.node_type == NodeType::Agent)
+                            .is_some_and(|node| node.node_type == kind)
                     })
                     .map(|_| ())
             })
@@ -326,19 +338,32 @@ impl crate::app::App {
     }
 
     pub(crate) fn dispatch_workflow_ready_nodes(&mut self) {
-        let max_concurrent = self.config_workflow_max_agents();
         let mut dispatched_any = false;
         let run_ids: Vec<String> = self.workflow_runs.keys().cloned().collect();
         for run_id in &run_ids {
             loop {
-                let in_flight = self.workflow_agent_in_flight();
                 let ready = {
                     let Some(live) = self.workflow_runs.get(run_id) else {
                         break;
                     };
-                    live.engine.ready_nodes(in_flight, max_concurrent)
+                    live.engine.ready_nodes()
                 };
-                let Some(node_id) = ready.first().cloned() else {
+                // Per-kind budgets (P3d): agents and llm_chat cap separately;
+                // template/image nodes take no slot. Slots are re-queried
+                // every iteration — dispatching flips a node to Running.
+                let agent_slots = self
+                    .config_workflow_max_agents()
+                    .saturating_sub(self.workflow_agent_in_flight());
+                let llm_slots = self
+                    .config_workflow_max_llm()
+                    .saturating_sub(self.workflow_llm_in_flight());
+                let dispatchable = {
+                    let Some(live) = self.workflow_runs.get(run_id) else {
+                        break;
+                    };
+                    pick_dispatchable(&ready, &live.engine.def, agent_slots, llm_slots)
+                };
+                let Some(node_id) = dispatchable else {
                     break;
                 };
                 if !self.dispatch_workflow_node(run_id, &node_id) {
@@ -386,6 +411,27 @@ impl crate::app::App {
         self.workflow_limits.max_concurrent_agents.max(1)
     }
 
+    fn config_workflow_max_llm(&self) -> usize {
+        self.workflow_limits.max_concurrent_llm.max(1)
+    }
+
+    /// Shared per-run cancellation latch for detached curl threads. Every
+    /// dispatch of the run reuses ONE flag so cancel/finish arms every live
+    /// thread (the between-candidates retry loop stops before paying again;
+    /// the in-flight curl itself cannot be interrupted).
+    fn workflow_curl_cancel_flag(
+        &mut self,
+        run_id: &str,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        if let Some(flag) = self.workflow_curl_cancel.get(run_id) {
+            return flag.clone();
+        }
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.workflow_curl_cancel
+            .insert(run_id.to_string(), flag.clone());
+        flag
+    }
+
     /// Dispatch one node; returns false when dispatch must stop (run left
     /// the map or the node failed synchronously).
     fn dispatch_workflow_node(&mut self, run_id: &str, node_id: &str) -> bool {
@@ -427,6 +473,7 @@ impl crate::app::App {
         match node.node_type {
             NodeType::PromptTemplate => self.dispatch_template_node(run_id, &node),
             NodeType::ImageGen => self.dispatch_image_node(run_id, &node),
+            NodeType::LlmChat => self.dispatch_llm_node(run_id, &node),
             NodeType::Agent => self.dispatch_agent_node(run_id, &node),
         }
     }
@@ -525,9 +572,7 @@ impl crate::app::App {
         // Cancellation latch for the detached thread: cancel/finish arms it
         // so the between-candidates retry loop stops before paying again
         // (the in-flight curl itself cannot be interrupted).
-        let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.workflow_image_cancel
-            .insert(run_id.clone(), cancel_flag.clone());
+        let cancel_flag = self.workflow_curl_cancel_flag(&run_id);
 
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
@@ -573,6 +618,178 @@ impl crate::app::App {
                             });
                         }
                         result = Err(err);
+                        if class.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = event_tx.blocking_send(AppEvent::WorkflowNodeFinished(Box::new(
+                WorkflowNodeFinished {
+                    run_id,
+                    node_id,
+                    result,
+                    pool_attempts: attempts,
+                },
+            )));
+        });
+        true
+    }
+
+    fn dispatch_llm_node(&mut self, run_id: &str, node: &WorkflowNode) -> bool {
+        // Pool-bound nodes schedule up to MAX_POOL_ATTEMPTS candidates up
+        // front; the thread retries inside itself because the numeric HTTP
+        // status (the failover signal) never leaves `run_llm_chat`.
+        let pool_candidates = self.workflow_pool_candidates(run_id, node);
+        if node.provider_pool.is_some() && pool_candidates.as_ref().is_some_and(Vec::is_empty) {
+            self.skip_workflow_node(
+                run_id,
+                &node.id,
+                &format!(
+                    "blocked: provider pool '{}' has no enabled profiles",
+                    node.provider_pool.as_deref().unwrap_or("?")
+                ),
+            );
+            return true;
+        }
+        let profile = match &pool_candidates {
+            Some(candidates) => candidates.first().cloned(),
+            None => self.workflow_profile_for(run_id, node),
+        };
+        // A missing or disabled bound profile is a precondition failure
+        // (FR-9.1): blocked, not an execution error.
+        let blocked = match &profile {
+            Some(profile) if profile.is_disabled => Some(format!(
+                "blocked: provider profile '{}' is disabled",
+                profile.id
+            )),
+            None if node.provider_profile_id.is_none() => Some(
+                "blocked: llm_chat requires a bound provider profile".to_string(),
+            ),
+            None => Some(format!(
+                "blocked: provider profile '{}' not found",
+                node.provider_profile_id.as_deref().unwrap_or("?")
+            )),
+            Some(_) => None,
+        };
+        if let Some(reason) = blocked {
+            self.skip_workflow_node(run_id, &node.id, &reason);
+            return true;
+        }
+        let candidates = pool_candidates
+            .filter(|candidates| !candidates.is_empty())
+            .unwrap_or_else(|| vec![profile.expect("checked above")]);
+        // Empty model is a pre-flight error (FR-3.8): fail the node without
+        // paying for an API call. Parse-level validation already rejects it;
+        // this guards nodes that slip past a hand-edited definition.
+        let Some(model) = node
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
+            self.fail_workflow_node(run_id, &node.id, "llm_chat node requires a model".to_string());
+            return false;
+        };
+        let (prompt, system) = {
+            let Some(live) = self.workflow_runs.get(run_id) else {
+                return false;
+            };
+            let prompt = match render(node.prompt.as_deref().unwrap_or(""), &live.engine.outputs) {
+                Ok(prompt) => prompt,
+                Err(err) => {
+                    self.fail_workflow_node(run_id, &node.id, err);
+                    return false;
+                }
+            };
+            let system = match node.system.as_deref() {
+                Some(system) => match render(system, &live.engine.outputs) {
+                    Ok(system) => Some(system),
+                    Err(err) => {
+                        self.fail_workflow_node(run_id, &node.id, err);
+                        return false;
+                    }
+                },
+                None => None,
+            };
+            (prompt, system)
+        };
+        let max_time_secs = llm::max_time_secs(node.timeout_ms);
+        let max_tokens = node.max_tokens;
+        let temperature = node.temperature;
+        let model = model.to_string();
+        let node_id = node.id.clone();
+        let run_id = run_id.to_string();
+        let report_attempts = node.provider_pool.is_some();
+        if let Some(live) = self.workflow_runs.get_mut(&run_id) {
+            live.engine.mark_running(&node_id);
+        }
+        // Cancellation latch shared with image_gen (per run): cancel/finish
+        // arms it so the between-candidates retry loop stops before paying
+        // again (the in-flight curl itself cannot be interrupted).
+        let cancel_flag = self.workflow_curl_cancel_flag(&run_id);
+
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let mut attempts: Vec<PoolAttempt> = Vec::new();
+            let mut result = Err("no pool candidates".to_string());
+            for profile in &candidates {
+                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    result = Err("run cancelled during llm chat".to_string());
+                    break;
+                }
+                // Gemini is not a chat wire (P3d scope); a later candidate
+                // may still serve the request.
+                let Some(wire) = llm::wire_for(profile.protocol) else {
+                    if report_attempts {
+                        attempts.push(PoolAttempt {
+                            profile_id: profile.id.clone(),
+                            class: None,
+                            outcome: "error".to_string(),
+                        });
+                    }
+                    result = Err(format!(
+                        "llm_chat requires an openai-compat or anthropic provider profile (profile '{}' is gemini)",
+                        profile.id
+                    ));
+                    continue;
+                };
+                match llm::run_llm_chat(
+                    profile,
+                    wire,
+                    system.as_deref(),
+                    &prompt,
+                    &model,
+                    max_tokens,
+                    temperature,
+                    max_time_secs,
+                ) {
+                    Ok((text, meta)) => {
+                        if report_attempts {
+                            attempts.push(PoolAttempt {
+                                profile_id: profile.id.clone(),
+                                class: None,
+                                outcome: "ok".to_string(),
+                            });
+                        }
+                        result = Ok((text, meta));
+                        break;
+                    }
+                    Err(err) => {
+                        // Only a real HTTP status classifies (401/403/429/5xx)
+                        // and justifies the next profile: transport errors and
+                        // 2xx parse failures already paid — a retry would
+                        // double-bill, so they stop here regardless of what
+                        // their text happens to say.
+                        let class = err.status.and_then(pool::classify_status);
+                        if report_attempts {
+                            attempts.push(PoolAttempt {
+                                profile_id: profile.id.clone(),
+                                class,
+                                outcome: pool::attempt_outcome(&err.message),
+                            });
+                        }
+                        result = Err(err.message);
                         if class.is_none() {
                             break;
                         }
@@ -1519,7 +1736,7 @@ impl crate::app::App {
             .retain(|(chain_run, _), _| chain_run != run_id);
         // Terminal for every path: arm the image-thread latch (a done run's
         // detached retry would be pure waste) and drop the flag entry.
-        if let Some(flag) = self.workflow_image_cancel.remove(run_id) {
+        if let Some(flag) = self.workflow_curl_cancel.remove(run_id) {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         live.engine.status = status;
@@ -1773,6 +1990,15 @@ impl crate::app::App {
                         })
                     });
                     let meta = runs::load_node_meta(run_id, &node.id);
+                    // Done only: output.txt lands at completion, so a Running
+                    // node with an existing file is showing the PREVIOUS
+                    // attempt's answer — stale data posing as live progress.
+                    let output_tail = if state.is_some_and(|state| state.phase == NodePhase::Done)
+                    {
+                        runs::load_output_tail(run_id, &node.id, runs::OUTPUT_TAIL_LINES)
+                    } else {
+                        None
+                    };
                     WorkflowNodeView {
                         id: node.id.clone(),
                         title: node.display_title().to_string(),
@@ -1796,6 +2022,7 @@ impl crate::app::App {
                         cost_usd: meta.as_ref().and_then(|meta| meta.cost_usd),
                         tokens: meta.as_ref().and_then(|meta| meta.tokens),
                         artifact: meta.as_ref().and_then(|meta| meta.artifact.clone()),
+                        output_tail,
                         pane,
                         agent_state,
                         sort_y: node.position.map(|position| position.y),
@@ -1823,6 +2050,11 @@ impl crate::app::App {
             .map(|node| {
                 let node_record = record.nodes.iter().find(|n| n.id == node.id);
                 let meta = runs::load_node_meta(run_id, &node.id);
+                let output_tail = if node_record.is_some_and(|n| n.phase == NodePhase::Done) {
+                    runs::load_output_tail(run_id, &node.id, runs::OUTPUT_TAIL_LINES)
+                } else {
+                    None
+                };
                 WorkflowNodeView {
                     id: node.id.clone(),
                     title: node.display_title().to_string(),
@@ -1846,6 +2078,7 @@ impl crate::app::App {
                     cost_usd: meta.as_ref().and_then(|meta| meta.cost_usd),
                     tokens: meta.as_ref().and_then(|meta| meta.tokens),
                     artifact: meta.as_ref().and_then(|meta| meta.artifact.clone()),
+                    output_tail,
                     pane: None,
                     agent_state: None,
                     sort_y: node.position.map(|position| position.y),
@@ -1872,7 +2105,29 @@ fn node_kind_str(node_type: NodeType) -> &'static str {
         NodeType::Agent => "agent",
         NodeType::PromptTemplate => "prompt_template",
         NodeType::ImageGen => "image_gen",
+        NodeType::LlmChat => "llm_chat",
     }
+}
+
+/// The next ready node that fits its kind's free slots (file order
+/// preserved). Agents and llm_chat cap separately (P3d); template and
+/// image_gen nodes take no slot.
+fn pick_dispatchable(
+    ready: &[String],
+    def: &WorkflowDef,
+    agent_slots: usize,
+    llm_slots: usize,
+) -> Option<String> {
+    ready
+        .iter()
+        .find(|node_id| {
+            def.node(node_id).is_some_and(|node| match node.node_type {
+                NodeType::Agent => agent_slots > 0,
+                NodeType::LlmChat => llm_slots > 0,
+                _ => true,
+            })
+        })
+        .cloned()
 }
 
 /// Failed and skipped nodes re-run on resume (W9 fix-and-rerun); skips are
@@ -2000,5 +2255,43 @@ mod tests {
         assert!(id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-')));
+    }
+
+    #[test]
+    fn pick_dispatchable_respects_per_kind_slots() {
+        let def = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "t", "type": "prompt_template", "template": "x"},
+                {"id": "l1", "type": "llm_chat", "prompt": "p", "model": "m"},
+                {"id": "l2", "type": "llm_chat", "prompt": "p", "model": "m"},
+                {"id": "a", "type": "agent", "runtime": "claude-code", "prompt": "p"}
+            ]}"#,
+        )
+        .unwrap();
+        let ready = vec![
+            "l1".to_string(),
+            "l2".to_string(),
+            "a".to_string(),
+            "t".to_string(),
+        ];
+        // Agents starved, llm free: the first llm node wins; templates never
+        // starve behind either budget.
+        assert_eq!(
+            pick_dispatchable(&ready, &def, 0, 8).as_deref(),
+            Some("l1"),
+            "llm nodes dispatch even with the agent budget full"
+        );
+        assert_eq!(
+            pick_dispatchable(&ready, &def, 0, 0).as_deref(),
+            Some("t"),
+            "templates dispatch even with every budget full"
+        );
+        let agents_then_template = vec!["a".to_string(), "t".to_string()];
+        assert_eq!(
+            pick_dispatchable(&agents_then_template, &def, 1, 0).as_deref(),
+            Some("a")
+        );
+        // Both capped: only unslotted kinds may still go.
+        assert_eq!(pick_dispatchable(&["a".into()], &def, 0, 8), None);
     }
 }
