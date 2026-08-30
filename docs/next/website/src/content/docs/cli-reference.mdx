@@ -501,9 +501,10 @@ herdr workflow pause <run_id>
 herdr workflow resume <run_id>
 herdr workflow cancel <run_id>
 herdr workflow delete <run_id>
+herdr workflow bind <path.aflow.json> --node <id> [--runtime <r>] [--profile <id>] [--model <m>] [--timeout-ms <n>] [--visible|--invisible] [--enable|--disable]
 ```
 
-`workflow run` validates the file, creates a run workspace, and dispatches agent nodes as visible tabs (or background processes with `"visible": false`). `workflow pause` finishes running nodes but dispatches nothing new; `workflow resume` re-reads the file and re-runs only nodes whose config or upstream outputs changed. `workflow cancel` kills running nodes and keeps the cache. Node prompts reference upstream outputs with `{{node_id.output}}`; each agent node binds its own provider profile (model, key, endpoint).
+`workflow run` validates the file, creates a run workspace, and dispatches agent nodes as visible tabs (or background processes with `"visible": false`). `workflow pause` finishes running nodes but dispatches nothing new; `workflow resume` re-reads the file and re-runs only nodes whose config or upstream outputs changed (errored runs resume too, after a fix). `workflow cancel` kills running nodes and keeps the cache. `workflow bind` edits a node's single-value bindings in the file — the same fields the TUI inspector edits; an empty `--profile` or `--model` value clears the binding. Node prompts reference upstream outputs with `{{node_id.output}}`; each agent node binds its own provider profile (model, key, endpoint).
 ## Read sources
 
 | Source | Meaning |

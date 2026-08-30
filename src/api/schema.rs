@@ -276,6 +276,8 @@ pub enum Method {
     WorkflowCancel(WorkflowCancelParams),
     #[serde(rename = "workflow.delete")]
     WorkflowDelete(WorkflowDeleteParams),
+    #[serde(rename = "workflow.update")]
+    WorkflowUpdate(WorkflowUpdateParams),
 }
 
 #[cfg(test)]

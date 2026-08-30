@@ -279,10 +279,11 @@ pub(crate) fn interactive_unix_shell_command(
 }
 
 pub(crate) fn quote_powershell_arg(value: &str) -> String {
+    // Bare `=`/`+` are PowerShell tokens (base64 padding broke a whole
+    // command once), so they must ride inside quotes.
     if !value.is_empty()
         && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'_' | b'-' | b'.' | b'/' | b':' | b'+' | b'=')
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b':')
         })
     {
         return value.to_string();

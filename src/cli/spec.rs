@@ -1416,6 +1416,51 @@ fn workflow_command() -> Command {
                 .about("Delete a workflow run and its cached outputs")
                 .arg(Arg::new("run_id").required(true)),
         )
+        .subcommand(
+            Command::new("bind")
+                .about("Edit a node's bindings in a workflow file (runtime/profile/model/timeout/visibility/enabled)")
+                .arg(
+                    Arg::new("path")
+                        .required(true)
+                        .value_hint(ValueHint::FilePath),
+                )
+                .arg(Arg::new("node").long("node").required(true).num_args(1))
+                .arg(
+                    Arg::new("runtime")
+                        .long("runtime")
+                        .num_args(1)
+                        .value_parser([
+                            "claude-code", "codex", "grok-build", "dsh", "custom",
+                        ]),
+                )
+                .arg(Arg::new("profile").long("profile").num_args(1))
+                .arg(Arg::new("model").long("model").num_args(1))
+                .arg(Arg::new("timeout_ms").long("timeout-ms").num_args(1))
+                .arg(
+                    Arg::new("visible")
+                        .long("visible")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("invisible"),
+                )
+                .arg(
+                    Arg::new("invisible")
+                        .long("invisible")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("visible"),
+                )
+                .arg(
+                    Arg::new("enable")
+                        .long("enable")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("disable"),
+                )
+                .arg(
+                    Arg::new("disable")
+                        .long("disable")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("enable"),
+                ),
+        )
 }
 
 fn provider_command() -> Command {

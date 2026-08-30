@@ -56,7 +56,37 @@ fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     (ws_h, detail_h)
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
+/// Runs-strip height: hidden with no runs; otherwise a header line plus up
+/// to three newest entries plus an overflow row.
+pub(crate) fn workflow_runs_strip_height(run_count: usize) -> u16 {
+    if run_count == 0 {
+        return 0;
+    }
+    let rows = run_count.min(3) + usize::from(run_count > 3);
+    1 + rows as u16
+}
+
+/// The bottom strip hosting workflow run entries. The agents section gives
+/// up this height inside `expanded_sidebar_sections`, so the divider drag
+/// and every consumer stay coherent with the strip visible.
+pub(crate) fn workflow_runs_strip_rect(area: Rect, strip_h: u16) -> Rect {
+    if strip_h == 0 || area.height <= strip_h {
+        return Rect::default();
+    }
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    Rect::new(
+        content.x,
+        content.y + content.height - strip_h,
+        content.width,
+        strip_h,
+    )
+}
+
+pub(crate) fn expanded_sidebar_sections(
+    area: Rect,
+    split_ratio: f32,
+    strip_h: u16,
+) -> (Rect, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
@@ -64,6 +94,9 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
 
     let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
     let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
+    // The runs strip comes out of the agents section's bottom; the
+    // workspace section, divider position, and drag ratio are unaffected.
+    let detail_h = detail_h.saturating_sub(strip_h.min(detail_h));
     let detail_area = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
     (ws_area, detail_area)
 }
@@ -436,7 +469,7 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
 }
 
 pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
-    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
+    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio, 0);
     ws_area
 }
 
@@ -1002,11 +1035,61 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (ws_area, detail_area) = expanded_sidebar_sections(
+        area,
+        app.sidebar_section_split,
+        app.workflow_runs_strip_height(),
+    );
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
+    render_workflow_runs_strip(app, frame, area);
     render_sidebar_toggle(app, frame, area, false, p);
+}
+
+fn render_workflow_runs_strip(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let strip = workflow_runs_strip_rect(area, app.workflow_runs_strip_height());
+    if strip.width == 0 || strip.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            " runs",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(strip.x, strip.y, strip.width, 1),
+    );
+    for (index, run) in app.workflow_view.runs.iter().take(3).enumerate() {
+        let (dot, color) = match run.status.as_str() {
+            "running" => ("●", p.yellow),
+            "paused" => ("◐", p.yellow),
+            "done" => ("✓", p.green),
+            "error" => ("✗", p.red),
+            _ => ("·", p.overlay0),
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {dot} "), Style::default().fg(color)),
+                Span::styled(run.workflow_name.clone(), Style::default().fg(p.text)),
+                Span::styled(
+                    format!(" {}/{}", run.done_count, run.total_nodes),
+                    Style::default().fg(p.overlay0),
+                ),
+            ])),
+            Rect::new(strip.x, strip.y + 1 + index as u16, strip.width, 1),
+        );
+    }
+    if app.workflow_view.runs.len() > 3 {
+        let more = app.workflow_view.runs.len() - 3;
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" +{more} more"),
+                Style::default().fg(p.overlay0),
+            )),
+            Rect::new(strip.x, strip.y + strip.height - 1, strip.width, 1),
+        );
+    }
 }
 
 fn resolved_token_spans(
@@ -1671,7 +1754,11 @@ mod tests {
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let (_, agent_area) = expanded_sidebar_sections(
+            area,
+            app.sidebar_section_split,
+            app.workflow_runs_strip_height(),
+        );
         let body = agent_panel_body_rect(agent_area, false);
 
         let first = row_text(buffer, body.y, 25);
@@ -1722,7 +1809,11 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let (_, agent_area) = expanded_sidebar_sections(
+            area,
+            app.sidebar_section_split,
+            app.workflow_runs_strip_height(),
+        );
         let body = agent_panel_body_rect(agent_area, false);
         let buffer = terminal.backend().buffer();
         let workspace = buffer[(find_symbol_x(buffer, body.y, body.width, "o"), body.y)].style();
@@ -2013,7 +2104,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let (_, agent_area) = expanded_sidebar_sections(
+            area,
+            app.sidebar_section_split,
+            app.workflow_runs_strip_height(),
+        );
         let body = agent_panel_body_rect(agent_area, false);
         let first = row_text(buffer, body.y, 17);
 
@@ -2043,7 +2138,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         renderer
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let (_, agent_area) = expanded_sidebar_sections(
+            area,
+            app.sidebar_section_split,
+            app.workflow_runs_strip_height(),
+        );
         let body = agent_panel_body_rect(agent_area, false);
         let rendered = row_text(renderer.backend().buffer(), body.y, 9);
 
@@ -2632,7 +2731,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn expanded_sidebar_sections_handle_tiny_heights() {
-        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
+        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9, 0);
 
         assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
         assert_eq!(detail_area, Rect::new(0, 3, 19, 2));

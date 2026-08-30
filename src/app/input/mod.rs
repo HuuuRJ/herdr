@@ -47,6 +47,7 @@ mod selection;
 mod settings;
 mod sidebar;
 mod terminal;
+mod workflow_graph;
 
 pub(crate) use self::{
     lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
@@ -117,6 +118,7 @@ impl App {
                 Mode::Navigator => {
                     handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
                 }
+                Mode::WorkflowGraph => self.handle_workflow_graph_key(key_event),
                 Mode::Terminal => unreachable!(),
             },
         }
@@ -399,6 +401,9 @@ impl App {
                 match action {
                     MouseAction::NewWorkspace => {
                         self.begin_tui_workspace_create("tui.mouse.workspace.create")
+                    }
+                    MouseAction::OpenWorkflowGraph { run_id } => {
+                        self.open_workflow_graph(&run_id);
                     }
                     MouseAction::Settings(action) => match action {
                         SettingsAction::SaveTheme(name) => self.save_theme(&name),

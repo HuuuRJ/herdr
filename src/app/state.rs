@@ -906,6 +906,7 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
+    WorkflowGraph,
 }
 
 impl Mode {
@@ -936,6 +937,7 @@ impl Mode {
                 | Mode::ContextMenu
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
+                | Mode::WorkflowGraph
         )
     }
 }
@@ -1501,6 +1503,174 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+// -- workflow graph view -----------------------------------------------------
+
+/// Sidebar-strip entry: one run (live overlaid on disk).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkflowRunSummary {
+    pub run_id: String,
+    pub workflow_name: String,
+    pub status: String,
+    pub started_unix: u64,
+    pub done_count: usize,
+    pub total_nodes: usize,
+}
+
+/// Projection of one node for the graph view / inspector. Built App-side
+/// from the live engine (or the disk record) plus per-node meta; render
+/// never touches the engine or the filesystem.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WorkflowNodeView {
+    pub id: String,
+    pub title: String,
+    /// agent | prompt_template | image_gen
+    pub kind: String,
+    pub runtime: Option<String>,
+    pub profile_id: Option<String>,
+    pub model: Option<String>,
+    pub visible: bool,
+    pub enabled: bool,
+    pub timeout_ms: u64,
+    /// pending | running | done | error
+    pub phase: String,
+    pub cached: bool,
+    pub error: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub tokens: Option<u64>,
+    pub artifact: Option<String>,
+    /// Pane currently bound to this node (live visible nodes only).
+    pub pane: Option<PaneId>,
+    /// herdr agent detection overlay (working/blocked/idle) for the bound
+    /// pane — UI coloring only, never execution semantics (W5).
+    pub agent_state: Option<crate::detect::AgentState>,
+    /// Canvas y hint for row ordering inside a layout column.
+    pub sort_y: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WorkflowGraphSnapshot {
+    pub run_id: String,
+    pub workflow_name: String,
+    pub path: String,
+    /// running | paused | cancelled | done | error
+    pub status: String,
+    pub live: bool,
+    pub workspace_idx: Option<usize>,
+    pub nodes: Vec<WorkflowNodeView>,
+    /// (upstream, downstream) pairs from `after` lists.
+    pub edges: Vec<(String, String)>,
+}
+
+impl AppState {
+    /// Sidebar runs-strip height for the current run list (0 = hidden).
+    pub fn workflow_runs_strip_height(&self) -> u16 {
+        crate::ui::workflow_runs_strip_height(self.workflow_view.runs.len())
+    }
+}
+
+impl WorkflowGraphSnapshot {
+    /// Deterministic DAG layout for this snapshot (pure; render and input
+    /// both call it, each computing it locally from the same data).
+    pub(crate) fn graph_layout(&self) -> crate::workflow::graph::GraphLayout {
+        let nodes: Vec<crate::workflow::graph::LayoutNode> = self
+            .nodes
+            .iter()
+            .map(|node| crate::workflow::graph::LayoutNode {
+                id: node.id.clone(),
+                title: node.title.clone(),
+                meta: match (&node.runtime, &node.model) {
+                    (Some(runtime), Some(model)) => format!("{runtime}·{model}"),
+                    (Some(runtime), None) => runtime.clone(),
+                    (None, _) => node.kind.clone(),
+                },
+                sort_y: node.sort_y,
+                deps: self
+                    .edges
+                    .iter()
+                    .filter(|(_, to)| to == &node.id)
+                    .map(|(from, _)| from.clone())
+                    .collect(),
+            })
+            .collect();
+        crate::workflow::graph::layout_nodes(&nodes)
+    }
+
+    pub(crate) fn node(&self, id: &str) -> Option<&WorkflowNodeView> {
+        self.nodes.iter().find(|node| node.id == id)
+    }
+}
+
+/// Single-value field editor inside the inspector (Providers edit pattern).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkflowInspectorEdit {
+    pub field: WorkflowInspectorField,
+    pub buffer: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkflowInspectorField {
+    Runtime,
+    Profile,
+    Model,
+    TimeoutMs,
+    Visible,
+    Enabled,
+}
+
+impl WorkflowInspectorField {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::Profile => "profile",
+            Self::Model => "model",
+            Self::TimeoutMs => "timeout_ms",
+            Self::Visible => "visible",
+            Self::Enabled => "enabled",
+        }
+    }
+
+    /// Cache-invalidating edits re-run the node on the next run/resume.
+    pub(crate) fn invalidates_cache(self) -> bool {
+        matches!(self, Self::Runtime | Self::Profile | Self::Model)
+    }
+}
+
+/// Choice-list picker for enum/bool/profile fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkflowInspectorChoice {
+    pub field: WorkflowInspectorField,
+    pub list: SelectionListState,
+    /// Candidate labels in list order (empty = free-text edit instead).
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowInspectorState {
+    pub node_id: String,
+    pub list: SelectionListState,
+    pub edit: Option<WorkflowInspectorEdit>,
+    pub choice: Option<WorkflowInspectorChoice>,
+    /// Masked provider profiles for the profile picker.
+    pub profiles: Vec<crate::api::schema::ProviderProfileInfo>,
+}
+
+/// Projection target for the graph view and sidebar runs strip. Refreshed
+/// App-side on every workflow state change and on view open; render reads
+/// only this.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkflowViewState {
+    pub runs: Vec<WorkflowRunSummary>,
+    pub open: Option<WorkflowGraphSnapshot>,
+    pub selection: usize,
+    pub scroll_x: usize,
+    pub scroll_y: usize,
+    pub inspector: Option<WorkflowInspectorState>,
+    /// Armed by the first `x` press; the second cancels the run.
+    pub confirm_cancel: bool,
+    /// Transient footer notice (cleared by the next key press).
+    pub notice: Option<String>,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1669,6 +1839,8 @@ pub struct AppState {
     pub host_terminal_appearance_explicit: bool,
     /// Settings panel state.
     pub settings: SettingsState,
+    /// Workflow graph view + sidebar runs projection.
+    pub workflow_view: WorkflowViewState,
     /// Cached integration recommendations for onboarding/settings UI.
     pub integration_recommendations: Vec<crate::integration::IntegrationRecommendation>,
     /// Cached detection manifest source/version summaries for runtime/API status.
@@ -2061,6 +2233,7 @@ impl AppState {
                 original_theme: None,
                 providers: None,
             },
+            workflow_view: WorkflowViewState::default(),
             integration_recommendations: Vec::new(),
             agent_manifest_summaries: Vec::new(),
             agent_manifest_update_status:

@@ -321,6 +321,22 @@ impl AppState {
         rect_contains(self.navigator_popup_rect(), col, row)
     }
 
+    /// The workflow graph overlay shares the Navigator's popup geometry;
+    /// its body sits one header line below the inner top and one footer
+    /// line above the inner bottom.
+    pub(crate) fn workflow_graph_body_rect(&self) -> Rect {
+        let inner = self.navigator_inner_rect();
+        if inner.height <= 3 {
+            return Rect::default();
+        }
+        Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(2),
+        )
+    }
+
     pub(crate) fn navigator_search_contains(&self, col: u16, row: u16) -> bool {
         rect_contains(self.navigator_search_rect(), col, row)
     }

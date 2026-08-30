@@ -1260,6 +1260,9 @@ impl App {
             Method::WorkflowDelete(params) => {
                 return self.handle_workflow_delete(request.id, params);
             }
+            Method::WorkflowUpdate(params) => {
+                return self.handle_workflow_update(request.id, params);
+            }
             _ => {
                 return responses::encode_error(
                     request.id,

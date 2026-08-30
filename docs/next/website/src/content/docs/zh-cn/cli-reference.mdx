@@ -451,9 +451,10 @@ herdr workflow pause <run_id>
 herdr workflow resume <run_id>
 herdr workflow cancel <run_id>
 herdr workflow delete <run_id>
+herdr workflow bind <path.aflow.json> --node <id> [--runtime <r>] [--profile <id>] [--model <m>] [--timeout-ms <n>] [--visible|--invisible] [--enable|--disable]
 ```
 
-`workflow run` 校验文件、创建 run workspace，并把 agent 节点派发为可见 tab（或 `"visible": false` 时后台进程）。`workflow pause` 让在跑节点跑完但不再派发；`workflow resume` 重读文件，只重跑配置或上游输出变化了的节点。`workflow cancel` 杀掉在跑节点并保留缓存。节点 prompt 用 `{{node_id.output}}` 引用上游输出；每个 agent 节点绑定自己的供应商档案（模型、Key、地址）。
+`workflow run` 校验文件、创建 run workspace，并把 agent 节点派发为可见 tab（或 `"visible": false` 时后台进程）。`workflow pause` 让在跑节点跑完但不再派发；`workflow resume` 重读文件，只重跑配置或上游输出变化了的节点（修好后的 error run 也能 resume）。`workflow cancel` 杀掉在跑节点并保留缓存。`workflow bind` 在文件里编辑节点的单值绑定（与 TUI inspector 同字段）；`--profile` / `--model` 传空串即解除绑定。节点 prompt 用 `{{node_id.output}}` 引用上游输出；每个 agent 节点绑定自己的供应商档案（模型、Key、地址）。
 ## 读取来源
 
 | 来源 | 含义 |

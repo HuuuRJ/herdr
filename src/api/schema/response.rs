@@ -304,6 +304,9 @@ pub enum ResponseResult {
     WorkflowRun {
         run: super::workflows::WorkflowRunInfo,
     },
+    WorkflowUpdated {
+        path: String,
+    },
     Ok {},
 }
 

@@ -4383,6 +4383,59 @@
         "WorkflowListParams": {
           "type": "object"
         },
+        "WorkflowNodePatch": {
+          "description": "One node's single-value binding edit (W12: the TUI inspector edits only\nthese fields; prompt text is edited in the file itself).",
+          "properties": {
+            "enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "model": {
+              "description": "Model id; an empty string clears it (falls back to the profile's\nfirst visible model).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "provider_profile_id": {
+              "description": "Bound provider profile id; an empty string clears the binding.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runtime": {
+              "description": "Agent runtime id: claude-code | codex | grok-build | dsh | custom.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "visible": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node_id"
+          ],
+          "type": "object"
+        },
         "WorkflowPauseParams": {
           "properties": {
             "run_id": {
@@ -4414,6 +4467,25 @@
           },
           "required": [
             "path"
+          ],
+          "type": "object"
+        },
+        "WorkflowUpdateParams": {
+          "properties": {
+            "patches": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/WorkflowNodePatch"
+              },
+              "type": "array"
+            },
+            "path": {
+              "description": "Path to the `.aflow.json` file.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "patches"
           ],
           "type": "object"
         },
@@ -6429,6 +6501,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkflowDeleteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workflow.update",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkflowUpdateParams"
             }
           },
           "required": [
@@ -10743,6 +10831,22 @@
               "required": [
                 "type",
                 "run"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "workflow_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "path"
               ],
               "type": "object"
             },

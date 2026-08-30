@@ -88,6 +88,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::WorkflowResume(_)
             | Method::WorkflowCancel(_)
             | Method::WorkflowDelete(_)
+            | Method::WorkflowUpdate(_)
     )
 }
 

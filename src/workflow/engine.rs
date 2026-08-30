@@ -177,8 +177,54 @@ impl EngineRun {
     }
 
     pub(crate) fn resume(&mut self) {
-        if self.status == RunStatus::Paused {
+        if matches!(self.status, RunStatus::Paused | RunStatus::Error) {
             self.status = RunStatus::Running;
+        }
+    }
+
+    /// After resume: drop Done nodes whose cache key no longer matches — the
+    /// node was edited while the run was paused (W9), or an upstream node
+    /// reset just now and the downstream inputs hash moved. Resets cascade
+    /// through `<pending>` inputs hashes until stable. `cache_hit` reports
+    /// whether `(node_id, config_hash, inputs_hash)` still has a stored
+    /// result.
+    pub(crate) fn invalidate_stale_done_nodes(
+        &mut self,
+        cache_hit: impl Fn(&str, &str, &str) -> bool,
+    ) {
+        loop {
+            let mut reset_any = false;
+            let done_ids: Vec<String> = self
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.phase == NodePhase::Done)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for node_id in done_ids {
+                let config_hash = crate::workflow::runs::node_config_hash(&self.def, &node_id)
+                    .unwrap_or_default();
+                let output_hashes: HashMap<String, String> = self
+                    .nodes
+                    .iter()
+                    .filter_map(|(id, node)| {
+                        node.output_hash.clone().map(|hash| (id.clone(), hash))
+                    })
+                    .collect();
+                let inputs_hash =
+                    crate::workflow::runs::node_inputs_hash(&self.def, &node_id, &output_hashes)
+                        .unwrap_or_default();
+                if !cache_hit(&node_id, &config_hash, &inputs_hash) {
+                    if let Some(node) = self.nodes.get_mut(&node_id) {
+                        node.phase = NodePhase::Pending;
+                        node.output_hash = None;
+                        node.cached = false;
+                    }
+                    reset_any = true;
+                }
+            }
+            if !reset_any {
+                break;
+            }
         }
     }
 
@@ -319,5 +365,64 @@ mod tests {
         // Outputs are not persisted in the record (they live per-node on
         // disk); resume reloads them from the cache.
         assert!(restored.outputs.is_empty());
+    }
+
+    #[test]
+    fn resume_accepts_error_status() {
+        let mut run = two_node_run();
+        run.mark_error("a", "boom".to_string());
+        run.resume();
+        assert_eq!(run.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn invalidation_resets_edited_done_nodes_and_cascades() {
+        let def = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "prompt_template", "template": "hello"},
+                {"id": "b", "type": "prompt_template", "template": "{{a.output}}", "after": ["a"]},
+                {"id": "c", "type": "prompt_template", "template": "{{b.output}}", "after": ["b"]}
+            ]}"#,
+        )
+        .unwrap();
+        let mut run = EngineRun::new(def, "r1".to_string(), "/tmp/x".to_string());
+        run.mark_done("a", "hello".to_string(), output_hash("hello"));
+        run.mark_done("b", "HELLO".to_string(), output_hash("HELLO"));
+        run.mark_done("c", "done".to_string(), output_hash("done"));
+
+        // Cache keys as persisted at pause time.
+        let snapshot = run.clone();
+        let keys_at_pause: HashMap<String, (String, String)> = ["a", "b", "c"]
+            .into_iter()
+            .map(|id| {
+                let config =
+                    crate::workflow::runs::node_config_hash(&snapshot.def, id).unwrap_or_default();
+                let hashes: HashMap<String, String> = snapshot
+                    .nodes
+                    .iter()
+                    .filter_map(|(nid, n)| n.output_hash.clone().map(|h| (nid.clone(), h)))
+                    .collect();
+                let inputs = crate::workflow::runs::node_inputs_hash(&snapshot.def, id, &hashes)
+                    .unwrap_or_default();
+                (id.to_string(), (config, inputs))
+            })
+            .collect();
+
+        // The workflow file was edited while paused: b's template changed.
+        run.def.nodes[1].template = Some("{{a.output}} EDITED".to_string());
+        run.invalidate_stale_done_nodes(|id, config, inputs| {
+            keys_at_pause
+                .get(id)
+                .is_some_and(|(c, i)| c == config && i == inputs)
+        });
+
+        // a untouched, b reset (config changed), c reset (inputs changed).
+        assert_eq!(run.nodes.get("a").unwrap().phase, NodePhase::Done);
+        assert_eq!(run.nodes.get("b").unwrap().phase, NodePhase::Pending);
+        assert_eq!(run.nodes.get("c").unwrap().phase, NodePhase::Pending);
+        // With an always-hit cache, nothing further resets.
+        run.invalidate_stale_done_nodes(|_, _, _| true);
+        assert_eq!(run.nodes.get("b").unwrap().phase, NodePhase::Pending);
+        assert_eq!(run.nodes.get("c").unwrap().phase, NodePhase::Pending);
     }
 }

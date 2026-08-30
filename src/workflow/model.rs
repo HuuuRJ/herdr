@@ -27,7 +27,22 @@ pub(crate) enum NodeType {
 pub(crate) enum AgentRuntime {
     ClaudeCode,
     Codex,
+    GrokBuild,
+    Dsh,
     Custom,
+}
+
+impl AgentRuntime {
+    /// Wire id (matches the serde kebab-case spelling).
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+            Self::GrokBuild => "grok-build",
+            Self::Dsh => "dsh",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +69,16 @@ impl PermissionLevel {
             Self::Readonly => &["-s", "read-only"],
             Self::Workspace => &["-s", "workspace-write"],
             Self::Full => &["--yolo"],
+        }
+    }
+
+    /// dsh `DSH_PERMISSION_MODE` mapping (FR-8.3; the headless default is
+    /// already workspace-write, so that tier sets nothing).
+    pub(crate) fn dsh_env(self) -> Option<&'static str> {
+        match self {
+            Self::Readonly => Some("read-only"),
+            Self::Workspace => None,
+            Self::Full => Some("danger-full-access"),
         }
     }
 }
@@ -84,6 +109,10 @@ pub(crate) struct WorkflowNode {
     /// Run in a visible pane (true) or a background process (false).
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// Disabled nodes (and their transitive downstream) are structurally
+    /// skipped: they complete with an empty output port without spawning.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// 0 = no timeout.
     #[serde(default)]
     pub timeout_ms: u64,
@@ -207,7 +236,7 @@ impl WorkflowDef {
                     }
                     match node.runtime {
                         None => errors.push(format!(
-                            "agent node '{}' requires a runtime (claude-code, codex, or custom)",
+                            "agent node '{}' requires a runtime (claude-code, codex, grok-build, dsh, or custom)",
                             node.id
                         )),
                         Some(AgentRuntime::Custom)
@@ -402,6 +431,21 @@ impl WorkflowDef {
             }
         }
         seen.into_iter().collect()
+    }
+
+    /// A node is structurally skipped when it is disabled or any transitive
+    /// dependency is disabled — skip propagates downstream so later paid
+    /// agents never run on empty upstream ports (AgentFlow FR-4.4/FR-9.4).
+    pub(crate) fn is_structurally_skipped(&self, node_id: &str) -> bool {
+        let Some(node) = self.node(node_id) else {
+            return false;
+        };
+        if !node.enabled {
+            return true;
+        }
+        self.transitive_deps(node_id)
+            .iter()
+            .any(|dep| self.node(dep).is_some_and(|upstream| !upstream.enabled))
     }
 }
 
@@ -627,5 +671,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(template_references(&node), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn parses_grok_and_dsh_runtimes() {
+        let def = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "g", "type": "agent", "runtime": "grok-build", "prompt": "hi"},
+                {"id": "d", "type": "agent", "runtime": "dsh", "prompt": "hi"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(def.nodes[0].runtime, Some(AgentRuntime::GrokBuild));
+        assert_eq!(def.nodes[1].runtime, Some(AgentRuntime::Dsh));
+    }
+
+    #[test]
+    fn enabled_defaults_true_and_participates_in_cache_hash() {
+        let base: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "agent").trim_end_matches('}').to_string()
+                + r#", "runtime": "claude-code", "prompt": "p"}"#),
+        )
+        .unwrap();
+        assert!(base.enabled);
+        let disabled: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "agent").trim_end_matches('}').to_string()
+                + r#", "runtime": "claude-code", "prompt": "p", "enabled": false}"#),
+        )
+        .unwrap();
+        assert!(!disabled.enabled);
+        assert_ne!(
+            base.cache_projection(),
+            disabled.cache_projection(),
+            "toggling enabled must invalidate the node cache key"
+        );
+    }
+
+    #[test]
+    fn dsh_permission_env_mapping() {
+        assert_eq!(PermissionLevel::Readonly.dsh_env(), Some("read-only"));
+        assert_eq!(PermissionLevel::Workspace.dsh_env(), None);
+        assert_eq!(PermissionLevel::Full.dsh_env(), Some("danger-full-access"));
+    }
+
+    #[test]
+    fn skip_propagates_to_transitive_downstream() {
+        let def = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "off", "type": "prompt_template", "template": "t", "enabled": false},
+                {"id": "mid", "type": "prompt_template", "template": "m", "after": ["off"]},
+                {"id": "far", "type": "agent", "runtime": "claude-code", "prompt": "{{mid.output}}", "after": ["mid"]},
+                {"id": "side", "type": "prompt_template", "template": "s"}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(def.is_structurally_skipped("off"));
+        assert!(def.is_structurally_skipped("mid"));
+        assert!(def.is_structurally_skipped("far"));
+        assert!(!def.is_structurally_skipped("side"));
     }
 }

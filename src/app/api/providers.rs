@@ -549,13 +549,23 @@ impl App {
 impl App {
     /// Reload the masked profile list backing the Providers settings tab.
     /// Called when the section opens and after every provider action.
+    /// Masked profile snapshots for pickers outside the settings screen
+    /// (workflow inspector).
+    pub(crate) fn masked_provider_profiles(&self) -> Vec<ProviderProfileInfo> {
+        let mut profiles: Vec<ProviderProfileInfo> = crate::persist::provider_registry::load()
+            .iter()
+            .map(masked_info)
+            .collect();
+        profiles.sort_by(|left, right| left.name.cmp(&right.name));
+        profiles
+    }
+
     pub(crate) fn refresh_provider_section(&mut self) {
         let mut profiles: Vec<ProviderProfileInfo> = crate::persist::provider_registry::load()
             .iter()
             .map(masked_info)
             .collect();
         profiles.sort_by(|left, right| left.name.cmp(&right.name));
-
         let section = self
             .state
             .settings

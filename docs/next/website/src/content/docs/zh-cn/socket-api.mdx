@@ -107,7 +107,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 集成 | `integration.install`、`integration.uninstall` |
 | 插件 | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
 | 供应商 | `provider.list`、`provider.get`、`provider.create`、`provider.update`、`provider.delete`、`provider.presets`、`provider.test`、`provider.models.fetch`、`provider.reveal` |
-| 工作流 | `workflow.run`、`workflow.list`、`workflow.get`、`workflow.pause`、`workflow.resume`、`workflow.cancel`、`workflow.delete` |
+| 工作流 | `workflow.run`、`workflow.list`、`workflow.get`、`workflow.pause`、`workflow.resume`、`workflow.cancel`、`workflow.delete`、`workflow.update` |
 
 `agent.wait` 由服务器拥有并由事件驱动。它会固定到已解析的窗格占用者,因此替换后的智能体不能满足该等待。`agent.prompt` 接受可选的 `wait` 对象,其中包含 `until` 和 `timeout_ms`;这样可在一个请求中提交提示并开始等待,避免两个独立调用之间的竞态。如果解析出的智能体已经是 `blocked`,`agent.prompt` 不会发送输入或开始等待,而是返回 `agent_blocked`。
 
@@ -489,11 +489,11 @@ v1 没有 Herdr 管理的插件存储 API。`HERDR_PLUGIN_CONFIG_DIR` 和 `HERDR
 
 ## 工作流
 
-工作流是一个 `.aflow.json` 文件：带 `after` 依赖边的命名节点列表。`workflow.run {path}` 解析并校验文件、创建专属 workspace、调度 DAG。节点类型：`agent`（claude-code / codex / custom 运行时，按节点绑定供应商档案）、`prompt_template`（纯文本渲染）、`image_gen`（经绑定档案的 OpenAI 兼容 images 端点）。
+工作流是一个 `.aflow.json` 文件：带 `after` 依赖边的命名节点列表。`workflow.run {path}` 解析并校验文件、创建专属 workspace、调度 DAG。节点类型：`agent`（claude-code / codex / grok-build / dsh / custom 运行时，按节点绑定供应商档案）、`prompt_template`（纯文本渲染）、`image_gen`（经绑定档案的 OpenAI 兼容 images 端点）。grok-build 与 dsh 接受 openai-compat 档案，并在每节点的临时 HOME（`GROK_HOME` / `DSH_HOME`）下运行，用户全局配置零触碰。
 
 可见 agent 节点以带标签 tab 的形式运行在 run workspace 里；平台 shell 包装把输出镜像到 run 目录并追加 `HERDR_EXIT:<code>` 哨兵，因此退出码与输出在 pane 拆除后依然可用。不可见节点（`"visible": false`）以后台进程执行。
 
-`workflow.pause` 是软停止：在跑的节点跑完、不派发新节点。`workflow.resume` 重新读取工作流文件并通过内容哈希缓存跳过未变节点——暂停中编辑文件（增删改节点）后 resume，只有受影响的节点重跑。`workflow.cancel` 杀掉在跑节点并保留缓存；`workflow.delete` 删除 run 目录与 workspace。run 持久化在状态目录（`workflows/runs/<run_id>/`），保留最新 `workflow.keep_runs` 个。`workflow.max_concurrent_agents` 限制所有 run 的并发 agent 节点总数。custom 命令经平台 shell 执行：Unix 用 POSIX sh，Windows 用 PowerShell 5.1（不支持 `&&`，请用 `;`）。
+`workflow.pause` 是软停止：在跑的节点跑完、不派发新节点。`workflow.resume` 重新读取工作流文件并通过内容哈希缓存跳过未变节点——暂停中编辑文件（增删改节点，含已完成的节点）后 resume，只有受影响的节点重跑；error run 修好后也能 resume。`workflow.cancel` 杀掉在跑节点并保留缓存；`workflow.delete` 删除 run 目录与 workspace。`workflow.update {path, patches}` 在文件里编辑并校验节点绑定（runtime / 档案 / 模型 / 超时 / 可见性 / enabled）；空串解除可选绑定，未知的 JSON 字段原样保留。禁用节点（`"enabled": false`）及其下游以空输出端口结构性完成。run 持久化在状态目录（`workflows/runs/<run_id>/`），保留最新 `workflow.keep_runs` 个。`workflow.max_concurrent_agents` 限制所有 run 的并发 agent 节点总数。custom 命令经平台 shell 执行：Unix 用 POSIX sh，Windows 用 PowerShell 5.1（不支持 `&&`，请用 `;`）。
 
 ## Socket 传输
 

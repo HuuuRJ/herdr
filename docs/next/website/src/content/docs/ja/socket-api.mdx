@@ -107,7 +107,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | インテグレーション | `integration.install`、`integration.uninstall` |
 | プラグイン | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
 | プロバイダー | `provider.list`、`provider.get`、`provider.create`、`provider.update`、`provider.delete`、`provider.presets`、`provider.test`、`provider.models.fetch`、`provider.reveal` |
-| ワークフロー | `workflow.run`、`workflow.list`、`workflow.get`、`workflow.pause`、`workflow.resume`、`workflow.cancel`、`workflow.delete` |
+| ワークフロー | `workflow.run`、`workflow.list`、`workflow.get`、`workflow.pause`、`workflow.resume`、`workflow.cancel`、`workflow.delete`、`workflow.update` |
 
 `agent.wait` はサーバー所有でイベント駆動です。解決したペイン占有者に固定されるため、置換されたエージェントが待機を満たすことはありません。`agent.prompt` は `until` と `timeout_ms` を持つ省略可能な `wait` オブジェクトを受け付けます。これにより、プロンプト送信と待機開始を 1 つのリクエストで行い、別々の呼び出し間の競合を避けられます。解決したエージェントがすでに `blocked` の場合、`agent.prompt` は入力を送信せず、待機も開始せずに `agent_blocked` を返します。
 
@@ -493,11 +493,11 @@ v1 には Herdr が管理するプラグインストレージ API はありま�
 
 ## ワークフロー
 
-ワークフローは `.aflow.json` ファイルです: `after` 依存エッジを持つ名前付きノードリスト。`workflow.run {path}` はファイルを解析・検証し、専用ワークスペースを作成して DAG をスケジュールします。ノードタイプ: `agent`（claude-code / codex / custom ランタイム、ノードごとにプロバイダープロファイルをバインド）、`prompt_template`（純粋なテキストレンダリング）、`image_gen`（バインドされたプロファイル経由の OpenAI 互換 images エンドポイント）。
+ワークフローは `.aflow.json` ファイルです: `after` 依存エッジを持つ名前付きノードリスト。`workflow.run {path}` はファイルを解析・検証し、専用ワークスペースを作成して DAG をスケジュールします。ノードタイプ: `agent`（claude-code / codex / grok-build / dsh / custom ランタイム、ノードごとにプロバイダープロファイルをバインド）、`prompt_template`（純粋なテキストレンダリング）、`image_gen`（バインドされたプロファイル経由の OpenAI 互換 images エンドポイント）。grok-build と dsh は openai-compat プロファイルを受け付け、ノードごとの一時ホーム（`GROK_HOME` / `DSH_HOME`）で実行されるためユーザーのグローバル設定は変更されません。
 
 可視エージェントノードは run ワークスペース内のラベル付きタブとして実行されます。プラットフォームシェルラッパーは出力を run ディレクトリにミラーし、`HERDR_EXIT:<code>` センチネルを追記するため、終了コードと出力はペーン破棄後も残ります。不可視ノード（`"visible": false`）はバックグラウンドプロセスとして実行されます。
 
-`workflow.pause` はソフトストップです: 実行中のノードは完了し、新しいノードは配信されません。`workflow.resume` はワークフローファイルを再読み込みし、コンテンツハッシュキャッシュにより変更されていないノードをスキップします — 一時停止中にファイルを編集（ノードの追加・削除・変更）して resume すると、影響を受けたノードのみ再実行されます。`workflow.cancel` は実行中のノードを強制終了しキャッシュを保持します。run はステートディレクトリ（`workflows/runs/<run_id>/`）に永続化され、最新の `workflow.keep_runs` 件が保持されます。`workflow.max_concurrent_agents` は全 run を通じた同時実行エージェントノード数の上限です。カスタムコマンドはプラットフォームシェル（Unix は POSIX sh、Windows は PowerShell 5.1 — `&&` は使えないため `;` を使用）で実行されます。
+`workflow.pause` はソフトストップです: 実行中のノードは完了し、新しいノードは配信されません。`workflow.resume` はワークフローファイルを再読み込みし、コンテンツハッシュキャッシュにより変更されていないノードをスキップします — 一時停止中にファイルを編集（完了済みノードを含む追加・削除・変更）して resume すると、影響を受けたノードのみ再実行されます。エラー終了した run も修正後に resume できます。`workflow.cancel` は実行中のノードを強制終了しキャッシュを保持します。`workflow.update {path, patches}` はノードのバインド（ランタイム / プロバイダープロファイル / モデル / タイムアウト / 可視性 / enabled）をファイル内で編集・検証します。空文字列はオプションのバインドを解除し、未知の JSON フィールドは保持されます。無効化されたノード（`"enabled": false`）とその下流は空の出力ポートで構造的に完了します。run はステートディレクトリ（`workflows/runs/<run_id>/`）に永続化され、最新の `workflow.keep_runs` 件が保持されます。`workflow.max_concurrent_agents` は全 run を通じた同時実行エージェントノード数の上限です。カスタムコマンドはプラットフォームシェル（Unix は POSIX sh、Windows は PowerShell 5.1 — `&&` は使えないため `;` を使用）で実行されます。
 
 ## ソケットトランスポート
 

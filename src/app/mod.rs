@@ -709,6 +709,7 @@ impl App {
                 original_theme: None,
                 providers: None,
             },
+            workflow_view: state::WorkflowViewState::default(),
             integration_recommendations: crate::integration::integration_recommendations(),
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
@@ -905,6 +906,9 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        // Seed the sidebar runs list from on-disk history (live runs overlay
+        // on later refreshes; without this a fresh session shows nothing).
+        app.refresh_workflow_view();
         Ok(app)
     }
 
@@ -1978,6 +1982,9 @@ impl App {
             }
             Mode::Navigator => {
                 input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
+            }
+            Mode::WorkflowGraph => {
+                self.handle_workflow_graph_key(key_event);
             }
             Mode::Terminal => {
                 // Should not be called in terminal mode.

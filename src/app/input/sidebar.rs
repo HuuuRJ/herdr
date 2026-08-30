@@ -18,8 +18,11 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        let (_, detail_area) =
-            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            sidebar,
+            self.sidebar_section_split,
+            self.workflow_runs_strip_height(),
+        );
         detail_area
     }
 
@@ -465,6 +468,31 @@ impl AppState {
         })
     }
 
+    /// Runs-strip hit test: returns the run id for a click on one of the
+    /// entry rows (the header row is not clickable).
+    pub(super) fn workflow_run_at(&self, col: u16, row: u16) -> Option<String> {
+        if self.sidebar_collapsed {
+            return None;
+        }
+        let strip = crate::ui::workflow_runs_strip_rect(
+            self.view.sidebar_rect,
+            self.workflow_runs_strip_height(),
+        );
+        if strip.height == 0 || col < strip.x || col >= strip.x + strip.width {
+            return None;
+        }
+        if row <= strip.y || row >= strip.y + strip.height {
+            return None;
+        }
+        let index = (row - strip.y - 1) as usize;
+        // The overflow row maps to the fourth entry — opening the next run
+        // in line is the honest behavior for "+N more".
+        self.workflow_view
+            .runs
+            .get(index)
+            .map(|run| run.run_id.clone())
+    }
+
     pub(super) fn on_agent_panel_sort_toggle(&self, col: u16, row: u16) -> bool {
         if self.sidebar_collapsed || self.agent_view_override.is_some() {
             return false;
@@ -473,6 +501,7 @@ impl AppState {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.workflow_runs_strip_height(),
         );
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
         rect.width > 0
@@ -855,6 +884,7 @@ mod tests {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.workflow_runs_strip_height(),
         );
         let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
         app.handle_mouse(mouse(
@@ -901,6 +931,7 @@ mod tests {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.workflow_runs_strip_height(),
         );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),

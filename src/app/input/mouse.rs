@@ -28,6 +28,9 @@ use super::{
 pub(super) enum MouseAction {
     NewWorkspace,
     Settings(SettingsAction),
+    OpenWorkflowGraph {
+        run_id: String,
+    },
     FocusWorkspace {
         ws_idx: usize,
     },
@@ -608,6 +611,10 @@ impl AppState {
                         self.agent_panel_scroll = 0;
                         self.mark_session_dirty();
                         return None;
+                    }
+
+                    if let Some(run_id) = self.workflow_run_at(mouse.column, mouse.row) {
+                        return Some(MouseAction::OpenWorkflowGraph { run_id });
                     }
 
                     if let Some(target) =

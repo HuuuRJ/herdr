@@ -82,6 +82,18 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     ));
 
     groups.push((
+        "workflow graph",
+        vec![
+            help_entry("←→↑↓ / h j k l", "select node"),
+            help_entry("enter", "open node pane / show artifacts"),
+            help_entry("i", "inspect node bindings"),
+            help_entry("p", "pause / resume run"),
+            help_entry("x x", "cancel run (press twice)"),
+            help_entry("esc", "close graph view"),
+        ],
+    ));
+
+    groups.push((
         "navigation",
         vec![
             help_entry("esc", "back"),

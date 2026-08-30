@@ -493,6 +493,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::WorkflowResume(_) => "workflow.resume",
         Method::WorkflowCancel(_) => "workflow.cancel",
         Method::WorkflowDelete(_) => "workflow.delete",
+        Method::WorkflowUpdate(_) => "workflow.update",
     }
 }
 

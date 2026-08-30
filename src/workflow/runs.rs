@@ -166,7 +166,7 @@ pub(crate) fn output_hash(output: &str) -> String {
     sha256_hex(output.as_bytes())
 }
 
-fn save_json_atomic(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+pub(crate) fn save_json_atomic(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -294,12 +294,21 @@ fn load_cached_node_at(
     Some((output, meta))
 }
 
-/// Delete runs beyond `keep` (oldest first). Returns removed run ids.
-pub(crate) fn prune_runs(keep: usize) -> Vec<String> {
+/// Read a node's persisted meta (cache keys + cost/artifact) without the
+/// cached output — used by the graph view projection.
+pub(crate) fn load_node_meta(run_id: &str, node_id: &str) -> Option<NodeMeta> {
+    let dir = node_root(run_id, node_id);
+    serde_json::from_str(&std::fs::read_to_string(dir.join("meta.json")).ok()?).ok()
+}
+
+/// Delete runs beyond `keep` (oldest first). Returns removed
+/// `(run_id, workspace_id)` pairs — callers close the workspaces of runs
+/// whose directories just disappeared.
+pub(crate) fn prune_runs(keep: usize) -> Vec<(String, Option<String>)> {
     prune_runs_at(&runs_root(), keep)
 }
 
-fn prune_runs_at(root: &Path, keep: usize) -> Vec<String> {
+fn prune_runs_at(root: &Path, keep: usize) -> Vec<(String, Option<String>)> {
     let mut records = load_all_records_at(root);
     if records.len() <= keep {
         return Vec::new();
@@ -313,7 +322,7 @@ fn prune_runs_at(root: &Path, keep: usize) -> Vec<String> {
         .filter(|record| record.status.is_terminal())
         .map(|record| {
             let _ = std::fs::remove_dir_all(run_root_at(root, &record.run_id));
-            record.run_id
+            (record.run_id, record.workspace_id)
         })
         .collect()
 }
@@ -451,7 +460,8 @@ mod tests {
             "newest must survive"
         );
         assert!(
-            removed.contains(&"run-old".to_string()) || load_record_at(&root, "run-old").is_none(),
+            removed.iter().any(|(id, _)| id == "run-old")
+                || load_record_at(&root, "run-old").is_none(),
             "older run must be pruned"
         );
         assert_eq!(load_all_records_at(&root).len(), 1);

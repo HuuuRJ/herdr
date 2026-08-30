@@ -451,9 +451,10 @@ herdr workflow pause <run_id>
 herdr workflow resume <run_id>
 herdr workflow cancel <run_id>
 herdr workflow delete <run_id>
+herdr workflow bind <path.aflow.json> --node <id> [--runtime <r>] [--profile <id>] [--model <m>] [--timeout-ms <n>] [--visible|--invisible] [--enable|--disable]
 ```
 
-`workflow run` はファイルを検証し、run ワークスペースを作成して、エージェントノードを可視タブ（または `"visible": false` でバックグラウンドプロセス）として配信します。`workflow pause` は実行中のノードを完了させつつ新しい配信を停止します。`workflow resume` はファイルを再読み込みし、設定または上流出力が変更されたノードのみ再実行します。`workflow cancel` は実行中のノードを強制終了しキャッシュを保持します。ノードプロンプトは `{{node_id.output}}` で上流出力を参照し、各エージェントノードは独自のプロバイダープロファイル（モデル・キー・エンドポイント）をバインドします。
+`workflow run` はファイルを検証し、run ワークスペースを作成して、エージェントノードを可視タブ（または `"visible": false` でバックグラウンドプロセス）として配信します。`workflow pause` は実行中のノードを完了させつつ新しい配信を停止します。`workflow resume` はファイルを再読み込みし、設定または上流出力が変更されたノードのみ再実行します（修正後のエラー run も resume できます）。`workflow cancel` は実行中のノードを強制終了しキャッシュを保持します。`workflow bind` はノードの単一値バインド（TUI インスペクターと同じフィールド）をファイル内で編集します。空の `--profile` / `--model` 値はバインドを解除します。ノードプロンプトは `{{node_id.output}}` で上流出力を参照し、各エージェントノードは独自のプロバイダープロファイル（モデル・キー・エンドポイント）をバインドします。
 ## 読み取りソース
 
 | ソース | 意味 |
