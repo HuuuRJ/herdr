@@ -86,7 +86,7 @@ pub(super) fn render_workflow_graph_overlay(app: &AppState, frame: &mut Frame) {
     } else if view.confirm_cancel {
         " press x again to cancel · esc disarms".to_string()
     } else {
-        " ←→↑↓ select · <> runs · enter pane · i inspect · p pause/resume · x cancel · esc close"
+        " ←→↑↓ select · tab/shift+tab runs · enter pane · i inspect · p pause/resume · x cancel · esc close"
             .to_string()
     };
     frame.render_widget(

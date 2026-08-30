@@ -127,6 +127,11 @@ fn graph_key(state: &mut AppState, key: KeyEvent) -> Option<WorkflowGraphAction>
             None
         }
         KeyCode::Enter => enter_action(state),
+        // Tab / Shift+Tab are the primary run-cycle keys: control keys are
+        // immune to IME fullwidth punctuation ('<' / '>' aliases break under
+        // Chinese input methods and stay as a fallback).
+        KeyCode::Tab if key.modifiers.is_empty() => cycle_run(state, 1),
+        KeyCode::Tab if key.modifiers == KeyModifiers::SHIFT => cycle_run(state, -1),
         KeyCode::Char('>') if plain(&key) => cycle_run(state, 1),
         KeyCode::Char('<') if plain(&key) => cycle_run(state, -1),
         KeyCode::Char('i') if plain(&key) => {
@@ -822,6 +827,34 @@ mod tests {
         update_workflow_graph_state(&mut state, key(KeyCode::Esc));
         assert!(state.workflow_view.inspector.is_none());
         assert_eq!(state.mode, Mode::WorkflowGraph);
+    }
+
+    #[test]
+    fn tab_cycles_runs() {
+        use crate::app::state::WorkflowRunSummary;
+        let mut state = view_state_open();
+        let summary = |run_id: &str, path_valid: bool| WorkflowRunSummary {
+            run_id: run_id.to_string(),
+            workflow_name: format!("wf-{run_id}"),
+            status: "done".to_string(),
+            started_unix: 0,
+            done_count: 1,
+            total_nodes: 1,
+            path_valid,
+        };
+        state.workflow_view.runs = vec![summary("r0", true), summary("r1", true)];
+        // Plain Tab goes to the next run; Shift+Tab goes back.
+        match update_workflow_graph_state(&mut state, key(KeyCode::Tab)) {
+            Some(WorkflowGraphAction::SwitchRun { run_id }) => assert_eq!(run_id, "r0"),
+            other => panic!("expected switch, got {other:?}"),
+        }
+        match update_workflow_graph_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
+        ) {
+            Some(WorkflowGraphAction::SwitchRun { run_id }) => assert_eq!(run_id, "r0"),
+            other => panic!("expected switch, got {other:?}"),
+        }
     }
 
     #[test]
