@@ -531,7 +531,13 @@ impl crate::app::App {
         };
         let mut env = profile
             .as_ref()
-            .map(|profile| provider_env(profile, sanitized_key.as_deref(), node.model.as_deref()))
+            .map(|profile| {
+                provider_env(
+                    profile,
+                    sanitized_key.as_deref(),
+                    effective_model(node, Some(profile)),
+                )
+            })
             .unwrap_or_default();
         // Runtime-specific injection (FR-8.4): per-node temp homes keep the
         // user's global grok/dsh config untouched (A6).

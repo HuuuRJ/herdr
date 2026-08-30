@@ -45,6 +45,11 @@ pub(crate) fn build_agent_command(
 ) -> Result<AgentCommand, String> {
     match node.runtime {
         Some(AgentRuntime::ClaudeCode) => {
+            // Model selection rides env only (ANTHROPIC_MODEL + tier
+            // alignment in provider_env): relays reject the request shape
+            // the CLI sends with an argv --model (field-verified against
+            // moonshot's anthropic gateway: 400 modelCode with --model,
+            // success env-only), and env is what AgentFlow FR-8.4 specified.
             let mut argv = vec![
                 "claude".to_string(),
                 "-p".to_string(),
@@ -53,10 +58,6 @@ pub(crate) fn build_agent_command(
                 "stream-json".to_string(),
                 "--verbose".to_string(),
             ];
-            if let Some(model) = effective_model(node, profile) {
-                argv.push("--model".to_string());
-                argv.push(model.to_string());
-            }
             if let Some(max_turns) = node.max_turns {
                 argv.push("--max-turns".to_string());
                 argv.push(max_turns.to_string());
@@ -251,6 +252,8 @@ pub(crate) fn codex_provider_config(
     let provider_id = format!("af_{key_name}");
     let env_key = format!("AF_KEY_{key_name}");
     let args = vec![
+        "-c".to_string(),
+        format!("model_providers.{provider_id}.name=herdr-{key_name}"),
         "-c".to_string(),
         format!(
             "model_providers.{provider_id}.base_url={}",
@@ -589,7 +592,10 @@ fn parse_claude_stream(body: &str) -> Option<NodeOutput> {
             .and_then(|flag| flag.as_bool())
             .unwrap_or(false);
         let text = if is_error {
-            value
+            // grok puts the reason in `errors[]`; claude puts it in the
+            // `result` field of an error result line. Either way the node
+            // error must carry the real reason.
+            let from_errors = value
                 .get("errors")
                 .and_then(|errors| errors.as_array())
                 .map(|errors| {
@@ -599,7 +605,15 @@ fn parse_claude_stream(body: &str) -> Option<NodeOutput> {
                         .collect::<Vec<_>>()
                         .join("; ")
                 })
-                .filter(|joined| !joined.is_empty())
+                .filter(|joined| !joined.is_empty());
+            from_errors
+                .or_else(|| {
+                    value
+                        .get("result")
+                        .and_then(|result| result.as_str())
+                        .filter(|result| !result.is_empty())
+                        .map(|result| result.to_string())
+                })
                 .unwrap_or_else(|| "agent reported an execution error".to_string())
         } else {
             value
@@ -853,6 +867,7 @@ mod tests {
         );
         let (args, env_key) = codex_provider_config(Some(&openai_profile), Some("p1")).unwrap();
         let joined = args.join(" ");
+        assert!(joined.contains("model_providers.af_p1.name=herdr-p1"));
         assert!(joined.contains("model_providers.af_p1.base_url=https://api.example.com/v1"));
         assert!(joined.contains("model_providers.af_p1.env_key=AF_KEY_p1"));
         assert!(joined.contains("wire_api=responses"));
