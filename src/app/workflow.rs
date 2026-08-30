@@ -127,6 +127,36 @@ impl crate::app::App {
     }
 
     pub(crate) fn resume_workflow_run(&mut self, run_id: &str) -> Result<(), String> {
+        // A paused run still holds live state in THIS process: resume in
+        // place so pane/process bindings and deadlines survive and
+        // still-Running nodes are never re-spawned. The record rebuild below
+        // is only for runs recovered after a server restart.
+        if let Some(mut live) = self.workflow_runs.remove(run_id) {
+            if live.engine.status != RunStatus::Paused {
+                let status = live.engine.status;
+                self.workflow_runs.insert(run_id.to_string(), live);
+                return Err(format!(
+                    "run {run_id} is {} ; only paused or errored runs resume",
+                    status.as_str()
+                ));
+            }
+            let text = std::fs::read_to_string(&live.engine.workflow_path)
+                .map_err(|err| format!("failed to re-read workflow file: {err}"))?;
+            let def = WorkflowDef::parse(&text)?;
+            live.engine.def = def;
+            live.engine.resume();
+            reset_errored_nodes(&mut live.engine);
+            live.engine
+                .invalidate_stale_done_nodes(|node_id, config_hash, inputs_hash| {
+                    runs::load_cached_node(run_id, node_id, config_hash, inputs_hash).is_some()
+                });
+            self.workflow_runs.insert(run_id.to_string(), live);
+            self.persist_workflow_run(run_id);
+            self.dispatch_workflow_ready_nodes();
+            self.refresh_workflow_view();
+            return Ok(());
+        }
+
         let Some(record) = runs::load_record(run_id) else {
             return Err(format!("run {run_id} not found"));
         };
@@ -179,20 +209,7 @@ impl crate::app::App {
             }
         }
         // Failed nodes re-run on resume (W9 fix-and-rerun).
-        let errored: Vec<String> = engine
-            .nodes
-            .iter()
-            .filter(|(_, node)| node.phase == NodePhase::Error)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for node_id in errored {
-            if let Some(node) = engine.nodes.get_mut(&node_id) {
-                node.phase = NodePhase::Pending;
-                node.output_hash = None;
-                node.error = None;
-                node.cached = false;
-            }
-        }
+        reset_errored_nodes(&mut engine);
         // Done nodes edited while the run was paused (or stranded by an
         // upstream reset) cascade back to Pending; unchanged ones stay Done
         // and the cache reloads their outputs below.
@@ -1370,6 +1387,24 @@ fn node_kind_str(node_type: NodeType) -> &'static str {
         NodeType::Agent => "agent",
         NodeType::PromptTemplate => "prompt_template",
         NodeType::ImageGen => "image_gen",
+    }
+}
+
+/// Failed nodes re-run on resume (W9 fix-and-rerun).
+fn reset_errored_nodes(engine: &mut EngineRun) {
+    let errored: Vec<String> = engine
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.phase == NodePhase::Error)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for node_id in errored {
+        if let Some(node) = engine.nodes.get_mut(&node_id) {
+            node.phase = NodePhase::Pending;
+            node.output_hash = None;
+            node.error = None;
+            node.cached = false;
+        }
     }
 }
 

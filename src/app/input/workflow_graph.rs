@@ -25,6 +25,8 @@ pub(crate) enum WorkflowGraphAction {
     /// The inspector was requested; the App primes it (masked profiles come
     /// from the on-disk registry, which this pure layer cannot read).
     OpenInspector { node_id: String },
+    /// Jump to another run's graph (`<` / `>` cycle the runs list).
+    SwitchRun { run_id: String },
     /// Shared JSON-API path (pause/resume/cancel/update) so TUI and CLI hit
     /// identical handlers.
     Api(Box<Method>),
@@ -46,6 +48,9 @@ impl crate::app::App {
                 WorkflowGraphAction::OpenInspector { node_id } => {
                     let profiles = self.masked_provider_profiles();
                     open_inspector(&mut self.state, &node_id, profiles);
+                }
+                WorkflowGraphAction::SwitchRun { run_id } => {
+                    self.open_workflow_graph(&run_id);
                 }
                 WorkflowGraphAction::Api(method) => {
                     let _ = self.dispatch_runtime_mutation("tui.workflow.graph", *method);
@@ -122,6 +127,8 @@ fn graph_key(state: &mut AppState, key: KeyEvent) -> Option<WorkflowGraphAction>
             None
         }
         KeyCode::Enter => enter_action(state),
+        KeyCode::Char('>') if plain(&key) => cycle_run(state, 1),
+        KeyCode::Char('<') if plain(&key) => cycle_run(state, -1),
         KeyCode::Char('i') if plain(&key) => {
             let node_id = selected_node(&state.workflow_view)?.id.clone();
             Some(WorkflowGraphAction::OpenInspector { node_id })
@@ -283,10 +290,24 @@ fn enter_action(state: &mut AppState) -> Option<WorkflowGraphAction> {
         .map(|artifact| format!(" ({artifact})"))
         .unwrap_or_default();
     state.workflow_view.notice = Some(format!(
-        "{detail}; artifacts: {}{artifact_note}",
+        "{detail}; output & logs: {}{artifact_note}",
         run_dir.display()
     ));
     None
+}
+
+/// Cycle to the previous/next run in the sidebar list (wraps).
+fn cycle_run(state: &mut AppState, direction: isize) -> Option<WorkflowGraphAction> {
+    let view = &state.workflow_view;
+    let runs = &view.runs;
+    if runs.len() < 2 {
+        return None;
+    }
+    let current = view.open.as_ref().map(|snapshot| &snapshot.run_id)?;
+    let index = runs.iter().position(|run| &run.run_id == current)?;
+    let next = (index as isize + direction).rem_euclid(runs.len() as isize) as usize;
+    let run_id = runs[next].run_id.clone();
+    Some(WorkflowGraphAction::SwitchRun { run_id })
 }
 
 fn toggle_pause(state: &mut AppState) -> Option<WorkflowGraphAction> {
@@ -690,7 +711,7 @@ mod tests {
             .workflow_view
             .notice
             .as_deref()
-            .is_some_and(|notice| notice.contains("artifacts")));
+            .is_some_and(|notice| notice.contains("output & logs")));
     }
 
     #[test]
@@ -793,6 +814,30 @@ mod tests {
         update_workflow_graph_state(&mut state, key(KeyCode::Esc));
         assert!(state.workflow_view.inspector.is_none());
         assert_eq!(state.mode, Mode::WorkflowGraph);
+    }
+
+    #[test]
+    fn angle_brackets_cycle_runs_with_wraparound() {
+        use crate::app::state::WorkflowRunSummary;
+        let mut state = view_state_open();
+        let summary = |run_id: &str| WorkflowRunSummary {
+            run_id: run_id.to_string(),
+            workflow_name: format!("wf-{run_id}"),
+            status: "done".to_string(),
+            started_unix: 0,
+            done_count: 1,
+            total_nodes: 1,
+        };
+        state.workflow_view.runs = vec![summary("r0"), summary("r1"), summary("r2")];
+        // The open snapshot is run "r1" (index 1): > goes to r2, < wraps to r0.
+        match update_workflow_graph_state(&mut state, key(KeyCode::Char('>'))) {
+            Some(WorkflowGraphAction::SwitchRun { run_id }) => assert_eq!(run_id, "r2"),
+            other => panic!("expected switch, got {other:?}"),
+        }
+        match update_workflow_graph_state(&mut state, key(KeyCode::Char('<'))) {
+            Some(WorkflowGraphAction::SwitchRun { run_id }) => assert_eq!(run_id, "r0"),
+            other => panic!("expected switch, got {other:?}"),
+        }
     }
 
     #[test]

@@ -86,7 +86,8 @@ pub(super) fn render_workflow_graph_overlay(app: &AppState, frame: &mut Frame) {
     } else if view.confirm_cancel {
         " press x again to cancel · esc disarms".to_string()
     } else {
-        " ←→↑↓ select · enter pane · i inspect · p pause/resume · x cancel · esc close".to_string()
+        " ←→↑↓ select · <> runs · enter pane · i inspect · p pause/resume · x cancel · esc close"
+            .to_string()
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
@@ -171,9 +172,13 @@ fn render_graph(app: &AppState, snapshot: &WorkflowGraphSnapshot, frame: &mut Fr
         ))
     };
 
-    // Connectors first — cards paint over them.
+    // Connectors first — cards paint over them. The selected node's edges
+    // light up in the accent color so upstream/downstream read at a glance.
+    let selected_id = snapshot
+        .nodes
+        .get(view.selection)
+        .map(|node| node.id.clone());
     let buf = frame.buffer_mut();
-    let connector_style = Style::default().fg(p.overlay0);
     for (from, to) in &snapshot.edges {
         let Some((fx, fy, fw)) = card_anchor(from) else {
             continue;
@@ -185,17 +190,32 @@ fn render_graph(app: &AppState, snapshot: &WorkflowGraphSnapshot, frame: &mut Fr
             (fx + fw).saturating_sub(scroll_x),
             fy + CARD_HEIGHT as u16 / 2 - scroll_y,
         );
+        // The arrow lands one cell before the target card so the card's own
+        // border does not paint over it.
         let entry = (
-            tx.saturating_sub(scroll_x),
+            tx.saturating_sub(scroll_x).saturating_sub(1),
             ty + CARD_HEIGHT as u16 / 2 - scroll_y,
         );
+        let highlighted = selected_id.as_deref() == Some(from.as_str())
+            || selected_id.as_deref() == Some(to.as_str());
+        let connector_style = if highlighted {
+            Style::default().fg(p.accent)
+        } else {
+            Style::default().fg(p.overlay1)
+        };
         for (x, y, cell) in graph::connector_cells(
             (exit.0 as usize, exit.1 as usize),
             (entry.0 as usize, entry.1 as usize),
         ) {
-            let (x, y) = (x as u16, y as u16);
-            if x >= body.x && x < body.x + body.width && y >= body.y && y < body.y + body.height {
-                if let Some(buffer_cell) = buf.cell_mut((x, y)) {
+            // Connector cells arrive in viewport coordinates (scroll already
+            // subtracted); translate them onto the screen before painting.
+            let (screen_x, screen_y) = (body.x + x as u16, body.y + y as u16);
+            if screen_x >= body.x
+                && screen_x < body.x + body.width
+                && screen_y >= body.y
+                && screen_y < body.y + body.height
+            {
+                if let Some(buffer_cell) = buf.cell_mut((screen_x, screen_y)) {
                     buffer_cell
                         .set_symbol(cell.symbol())
                         .set_style(connector_style);
@@ -220,6 +240,8 @@ fn render_graph(app: &AppState, snapshot: &WorkflowGraphSnapshot, frame: &mut Fr
             continue;
         }
         let selected = index == view.selection;
+        // Selected cards invert (accent background + contrast text) like a
+        // highlighted settings row; otherwise the border carries the phase.
         let border = if selected {
             p.accent
         } else {
@@ -233,7 +255,11 @@ fn render_graph(app: &AppState, snapshot: &WorkflowGraphSnapshot, frame: &mut Fr
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border))
-            .style(Style::default().bg(p.panel_bg));
+            .style(if selected {
+                Style::default().bg(p.accent)
+            } else {
+                Style::default().bg(p.panel_bg)
+            });
         frame.render_widget(Clear, clipped);
         frame.render_widget(block, clipped);
         let inner = Rect::new(
@@ -247,19 +273,18 @@ fn render_graph(app: &AppState, snapshot: &WorkflowGraphSnapshot, frame: &mut Fr
             continue;
         }
         let marker = if selected { "▸ " } else { "  " };
+        let content_fg = if selected {
+            panel_contrast_fg(p)
+        } else {
+            p.text
+        };
         let title = Line::from(Span::styled(
             format!("{marker}{}", node.title),
-            Style::default()
-                .fg(if selected {
-                    panel_contrast_fg(p)
-                } else {
-                    p.text
-                })
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(content_fg).add_modifier(Modifier::BOLD),
         ));
         let meta = Line::from(Span::styled(
             format!("  {}", node.runtime.as_deref().unwrap_or(&node.kind)),
-            Style::default().fg(p.overlay0),
+            Style::default().fg(if selected { content_fg } else { p.overlay0 }),
         ));
         frame.render_widget(Paragraph::new(title), inner);
         if inner.height > 1 {
@@ -269,12 +294,16 @@ fn render_graph(app: &AppState, snapshot: &WorkflowGraphSnapshot, frame: &mut Fr
             );
         }
         if inner.height > 2 {
+            let mut status = status_line(p, node, structurally_skipped(snapshot, &node.id));
+            if selected {
+                // One flat color on the inverted card; semantic colors would
+                // fight the accent background.
+                for span in &mut status.spans {
+                    span.style = Style::default().fg(content_fg);
+                }
+            }
             frame.render_widget(
-                Paragraph::new(status_line(
-                    p,
-                    node,
-                    structurally_skipped(snapshot, &node.id),
-                )),
+                Paragraph::new(status),
                 Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2),
             );
         }
@@ -479,4 +508,118 @@ fn render_inspector(
             1,
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::{Mode, WorkflowGraphSnapshot, WorkflowNodeView};
+    use ratatui::{backend::TestBackend, Terminal as TestTerminal};
+
+    fn node(id: &str, runtime: &str) -> WorkflowNodeView {
+        WorkflowNodeView {
+            id: id.to_string(),
+            title: id.to_string(),
+            kind: "agent".to_string(),
+            runtime: Some(runtime.to_string()),
+            profile_id: None,
+            model: None,
+            visible: true,
+            enabled: true,
+            timeout_ms: 0,
+            phase: "done".to_string(),
+            cached: false,
+            error: None,
+            cost_usd: Some(0.12),
+            tokens: Some(7),
+            artifact: None,
+            pane: None,
+            agent_state: None,
+            sort_y: None,
+        }
+    }
+
+    fn draw_graph(
+        selected: usize,
+    ) -> (
+        ratatui::buffer::Buffer,
+        ratatui::style::Color,
+        ratatui::style::Color,
+    ) {
+        let mut app = AppState::test_new();
+        app.workflow_view.open = Some(WorkflowGraphSnapshot {
+            run_id: "r1".to_string(),
+            workflow_name: "t".to_string(),
+            path: "/t.aflow.json".to_string(),
+            status: "done".to_string(),
+            live: false,
+            workspace_idx: None,
+            nodes: vec![node("alpha", "claude-code"), node("beta", "grok-build")],
+            edges: vec![("alpha".to_string(), "beta".to_string())],
+        });
+        app.workflow_view.selection = selected;
+        app.mode = Mode::WorkflowGraph;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 40));
+        let text_color = app.palette.text;
+        let contrast_color = panel_contrast_fg(&app.palette);
+        let mut terminal = TestTerminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render_workflow_graph_overlay(&app, frame))
+            .unwrap();
+        (
+            terminal.backend().buffer().clone(),
+            text_color,
+            contrast_color,
+        )
+    }
+
+    /// The graph text: one row per line so substring search works.
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+        let width = buffer.area().width as usize;
+        let mut rows = Vec::new();
+        let mut current = String::new();
+        for (index, cell) in buffer.content().iter().enumerate() {
+            if index > 0 && index % width == 0 {
+                rows.push(std::mem::take(&mut current));
+            }
+            current.push_str(cell.symbol());
+        }
+        rows.push(current);
+        rows
+    }
+
+    #[test]
+    fn connectors_render_between_cards() {
+        let (buffer, _, _) = draw_graph(0);
+        let text = buffer_text(&buffer).join("\n");
+        assert!(text.contains('─'), "horizontal connector cells visible");
+        assert!(text.contains('▶'), "connector arrowhead visible");
+    }
+
+    #[test]
+    fn selected_card_inverts_while_titles_stay_visible() {
+        let (buffer, text_color, contrast_color) = draw_graph(0);
+        // Match "alpha" by cell index: wide glyphs leave empty follow-up
+        // symbols that would shift any char-based search.
+        let find_cells = |word: &[&str]| -> Option<usize> {
+            let content = buffer.content();
+            'outer: for start in 0..content.len().saturating_sub(word.len()) {
+                for (offset, expected) in word.iter().enumerate() {
+                    if content[start + offset].symbol() != *expected {
+                        continue 'outer;
+                    }
+                }
+                return Some(start);
+            }
+            None
+        };
+        let alpha = find_cells(&["a", "l", "p", "h", "a"]).expect("selected title rendered");
+        assert_eq!(
+            buffer.content()[alpha].style().fg,
+            Some(contrast_color),
+            "selected title uses the inverted contrast color"
+        );
+        let beta = find_cells(&["b", "e", "t", "a"]).expect("unselected title rendered");
+        assert_eq!(buffer.content()[beta].style().fg, Some(text_color));
+    }
 }

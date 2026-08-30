@@ -241,10 +241,10 @@ pub(crate) fn connector_cells(
     for x in x1..mid_x {
         cells.push((x, y1, ConnCell::Horizontal));
     }
-    // Vertical turn.
+    // Vertical turn (same-row edges stay plain horizontals — no stray stem).
     let (low, high) = if y1 < y2 { (y1, y2) } else { (y2, y1) };
     for y in low..=high {
-        let vertical = y != y1 || y1 == y2;
+        let vertical = y != y1 && y != y2;
         let horizontal = y == y1 || y == y2;
         let cell = match (horizontal, vertical) {
             (true, true) => ConnCell::Cross,
@@ -364,5 +364,14 @@ mod tests {
         assert_eq!(*cells.last().unwrap(), (20, 5, ConnCell::Arrow));
         // Degenerate: target left of source draws nothing.
         assert!(connector_cells((10, 1), (5, 1)).is_empty());
+    }
+
+    #[test]
+    fn same_row_connector_has_no_vertical_stem() {
+        let cells = connector_cells((10, 2), (20, 2));
+        assert!(cells
+            .iter()
+            .all(|(_, _, cell)| matches!(cell, ConnCell::Horizontal | ConnCell::Arrow)));
+        assert!(!cells.contains(&(15, 2, ConnCell::Cross)));
     }
 }
