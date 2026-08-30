@@ -1534,10 +1534,13 @@ pub(crate) struct WorkflowNodeView {
     pub visible: bool,
     pub enabled: bool,
     pub timeout_ms: u64,
-    /// pending | running | done | error
+    /// pending | running | done | error | skipped
     pub phase: String,
     pub cached: bool,
     pub error: Option<String>,
+    /// Why a skipped node was skipped ("disabled", "blocked: …",
+    /// "upstream", "upstream_error").
+    pub skip_reason: Option<String>,
     pub cost_usd: Option<f64>,
     pub tokens: Option<u64>,
     pub artifact: Option<String>,
@@ -1555,7 +1558,7 @@ pub(crate) struct WorkflowGraphSnapshot {
     pub run_id: String,
     pub workflow_name: String,
     pub path: String,
-    /// running | paused | cancelled | done | error
+    /// running | paused | cancelled | done | error | partial_fail
     pub status: String,
     pub live: bool,
     pub workspace_idx: Option<usize>,

@@ -1065,6 +1065,7 @@ fn render_workflow_runs_strip(app: &AppState, frame: &mut Frame, area: Rect) {
             "running" => ("●", p.yellow),
             "paused" => ("◐", p.yellow),
             "done" => ("✓", p.green),
+            "partial_fail" => ("◐", p.red),
             "error" => ("✗", p.red),
             _ => ("·", p.overlay0),
         };

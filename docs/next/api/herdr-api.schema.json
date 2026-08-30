@@ -11011,8 +11011,15 @@
               "type": "string"
             },
             "phase": {
-              "description": "pending | running | done | error",
+              "description": "pending | running | done | error | skipped",
               "type": "string"
+            },
+            "skip_reason": {
+              "description": "Why a skipped node was skipped (\"disabled\", \"blocked: …\",\n\"upstream\", \"upstream_error\").",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -11046,7 +11053,7 @@
               "type": "integer"
             },
             "status": {
-              "description": "running | paused | cancelled | done | error",
+              "description": "running | paused | cancelled | done | error | partial_fail",
               "type": "string"
             },
             "workflow_name": {

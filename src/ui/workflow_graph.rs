@@ -126,6 +126,7 @@ fn run_status_style(status: &str) -> (ratatui::style::Color, String) {
         "running" => (ratatui::style::Color::Yellow, "running".to_string()),
         "paused" => (ratatui::style::Color::LightYellow, "paused".to_string()),
         "done" => (ratatui::style::Color::Green, "done".to_string()),
+        "partial_fail" => (ratatui::style::Color::LightRed, "partial_fail".to_string()),
         "error" => (ratatui::style::Color::Red, "error".to_string()),
         "cancelled" => (ratatui::style::Color::DarkGray, "cancelled".to_string()),
         other => (ratatui::style::Color::Gray, other.to_string()),
@@ -330,8 +331,18 @@ fn status_line(
     skipped: bool,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    if skipped {
-        spans.push(Span::styled("⊘ skipped", Style::default().fg(p.overlay0)));
+    // Phase-driven skip carries its reason; the derived flag stays for
+    // pre-dispatch previews and records written before the phase existed.
+    if node.phase == "skipped" || skipped {
+        let reason = node
+            .skip_reason
+            .as_deref()
+            .map(|reason| format!(" ({reason})"))
+            .unwrap_or_default();
+        spans.push(Span::styled(
+            format!("⊘ skipped{reason}"),
+            Style::default().fg(p.overlay0),
+        ));
         return Line::from(spans);
     }
     match node.phase.as_str() {
@@ -544,6 +555,7 @@ mod tests {
             phase: "done".to_string(),
             cached: false,
             error: None,
+            skip_reason: None,
             cost_usd: Some(0.12),
             tokens: Some(7),
             artifact: None,
@@ -608,6 +620,40 @@ mod tests {
         let text = buffer_text(&buffer).join("\n");
         assert!(text.contains('─'), "horizontal connector cells visible");
         assert!(text.contains('▶'), "connector arrowhead visible");
+    }
+
+    #[test]
+    fn skipped_phase_renders_marker_with_reason() {
+        let mut app = AppState::test_new();
+        let mut skipped = node("alpha", "claude-code");
+        // A long model widens the card so the full status line fits —
+        // cards clip at their computed width by design.
+        skipped.model = Some("claude-sonnet-4-5-20250929".to_string());
+        skipped.phase = "skipped".to_string();
+        skipped.skip_reason = Some("upstream_error".to_string());
+        app.workflow_view.open = Some(WorkflowGraphSnapshot {
+            run_id: "r1".to_string(),
+            workflow_name: "t".to_string(),
+            path: "/t.aflow.json".to_string(),
+            status: "partial_fail".to_string(),
+            live: false,
+            workspace_idx: None,
+            nodes: vec![skipped],
+            edges: Vec::new(),
+        });
+        app.workflow_view.selection = 0;
+        app.mode = Mode::WorkflowGraph;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 100, 40));
+        let mut terminal = TestTerminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render_workflow_graph_overlay(&app, frame))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer()).join("\n");
+        assert!(
+            text.contains("⊘ skipped (upstream_error)"),
+            "skip marker carries its reason, got: {text}"
+        );
+        assert!(text.contains("partial_fail"), "run banner shows partial_fail");
     }
 
     #[test]

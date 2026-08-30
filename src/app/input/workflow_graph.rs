@@ -332,9 +332,9 @@ fn toggle_pause(state: &mut AppState) -> Option<WorkflowGraphAction> {
         "running" => Some(WorkflowGraphAction::Api(Box::new(Method::WorkflowPause(
             WorkflowPauseParams { run_id },
         )))),
-        "paused" | "error" => Some(WorkflowGraphAction::Api(Box::new(Method::WorkflowResume(
-            WorkflowResumeParams { run_id },
-        )))),
+        "paused" | "error" | "partial_fail" => Some(WorkflowGraphAction::Api(Box::new(
+            Method::WorkflowResume(WorkflowResumeParams { run_id }),
+        ))),
         other => {
             state.workflow_view.notice = Some(format!("run is {other}; nothing to toggle"));
             None
@@ -669,6 +669,7 @@ mod tests {
             phase: phase.to_string(),
             cached: false,
             error: None,
+            skip_reason: None,
             cost_usd: None,
             tokens: None,
             artifact: None,
@@ -740,6 +741,17 @@ mod tests {
             Some(WorkflowGraphAction::Api(method))
                 if matches!(*method, Method::WorkflowResume(_)) => {}
             other => panic!("expected resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_fail_resumes_with_pause_key() {
+        let mut state = view_state_open();
+        state.workflow_view.open.as_mut().unwrap().status = "partial_fail".to_string();
+        match update_workflow_graph_state(&mut state, key(KeyCode::Char('p'))) {
+            Some(WorkflowGraphAction::Api(method))
+                if matches!(*method, Method::WorkflowResume(_)) => {}
+            other => panic!("expected resume for partial_fail, got {other:?}"),
         }
     }
 

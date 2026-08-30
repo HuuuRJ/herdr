@@ -20,6 +20,10 @@ pub(crate) struct EngineNode {
     pub error: Option<String>,
     #[serde(default)]
     pub cached: bool,
+    /// Why a Skipped node was skipped ("disabled", "blocked: …",
+    /// "upstream", "upstream_error", …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,6 +52,7 @@ impl EngineRun {
                         output_hash: None,
                         error: None,
                         cached: false,
+                        skip_reason: None,
                     },
                 )
             })
@@ -73,6 +78,7 @@ impl EngineRun {
                 node.output_hash = node_record.output_hash.clone();
                 node.error = node_record.error.clone();
                 node.cached = node_record.cached;
+                node.skip_reason = node_record.skip_reason.clone();
             }
         }
         run
@@ -119,13 +125,23 @@ impl EngineRun {
     }
 
     /// Record a completed node. Returns the run outcome when the run reaches
-    /// a terminal state.
+    /// a terminal state. A late completion for an already-terminal node
+    /// (e.g. its pane died after the timeout kill) is ignored.
     pub(crate) fn mark_done(
         &mut self,
         node_id: &str,
         output: String,
         output_hash: String,
     ) -> Option<RunStatus> {
+        let fresh = self.nodes.get(node_id).is_some_and(|node| {
+            !matches!(
+                node.phase,
+                NodePhase::Done | NodePhase::Error | NodePhase::Skipped
+            )
+        });
+        if !fresh {
+            return None;
+        }
         if let Some(node) = self.nodes.get_mut(node_id) {
             node.phase = NodePhase::Done;
             node.output_hash = Some(output_hash);
@@ -135,13 +151,105 @@ impl EngineRun {
         self.settle()
     }
 
-    pub(crate) fn mark_error(&mut self, node_id: &str, error: String) -> Option<RunStatus> {
+    /// Record a failed node. Non-tolerated failures fail the run outright
+    /// (the App drains still-running siblings before finishing). Tolerated
+    /// failures (`skip_on_error`, FR-5.2) leave the run going: downstream
+    /// is skipped and the run settles into `partial_fail` once everything
+    /// lands.
+    pub(crate) fn mark_node_error(
+        &mut self,
+        node_id: &str,
+        error: String,
+        tolerated: bool,
+    ) -> Option<RunStatus> {
+        // Late failures (e.g. a timeout re-firing, a second death event)
+        // must not overwrite a node that already reached a terminal phase.
+        let fresh = self.nodes.get(node_id).is_some_and(|node| {
+            !matches!(
+                node.phase,
+                NodePhase::Done | NodePhase::Error | NodePhase::Skipped
+            )
+        });
+        if !fresh {
+            return None;
+        }
         if let Some(node) = self.nodes.get_mut(node_id) {
             node.phase = NodePhase::Error;
             node.error = Some(error);
         }
-        self.status = RunStatus::Error;
-        Some(RunStatus::Error)
+        if !tolerated {
+            self.status = RunStatus::Error;
+            return Some(RunStatus::Error);
+        }
+        self.derive_skips();
+        self.settle()
+    }
+
+    /// Record a structural skip (disabled node, blocked precondition such
+    /// as a missing/disabled bound profile — FR-9.4). No spawn, no slot;
+    /// the node keeps an empty output port and downstream cascades.
+    pub(crate) fn mark_skipped(&mut self, node_id: &str, reason: &str) -> Option<RunStatus> {
+        let fresh = self.nodes.get(node_id).is_some_and(|node| {
+            !matches!(
+                node.phase,
+                NodePhase::Done | NodePhase::Error | NodePhase::Skipped
+            )
+        });
+        if !fresh {
+            return None;
+        }
+        if let Some(node) = self.nodes.get_mut(node_id) {
+            node.phase = NodePhase::Skipped;
+            node.skip_reason = Some(reason.to_string());
+        }
+        self.outputs.insert(node_id.to_string(), String::new());
+        self.derive_skips();
+        self.settle()
+    }
+
+    /// Flip Pending nodes whose fate is sealed upstream: any dependency
+    /// Skipped, or any dependency Error that declared `skip_on_error`.
+    /// Cascades to a fixpoint; skipped nodes keep an empty output port so
+    /// downstream renders never break (FR-9.4 empty-port semantics).
+    fn derive_skips(&mut self) {
+        loop {
+            let mut flipped: Vec<(String, &'static str)> = Vec::new();
+            for node in &self.def.nodes {
+                let Some(state) = self.nodes.get(&node.id) else {
+                    continue;
+                };
+                if state.phase != NodePhase::Pending {
+                    continue;
+                }
+                for dep in &node.after {
+                    let Some(dep_state) = self.nodes.get(dep) else {
+                        continue;
+                    };
+                    let reason = match dep_state.phase {
+                        NodePhase::Skipped => Some("upstream"),
+                        NodePhase::Error => {
+                            let tolerated = self.def.node(dep).is_some_and(|n| n.skip_on_error);
+                            tolerated.then_some("upstream_error")
+                        }
+                        _ => None,
+                    };
+                    if let Some(reason) = reason {
+                        flipped.push((node.id.clone(), reason));
+                        break;
+                    }
+                }
+            }
+            if flipped.is_empty() {
+                break;
+            }
+            for (id, reason) in flipped {
+                if let Some(state) = self.nodes.get_mut(&id) {
+                    state.phase = NodePhase::Skipped;
+                    state.skip_reason = Some(reason.to_string());
+                }
+                self.outputs.insert(id, String::new());
+            }
+        }
     }
 
     pub(crate) fn mark_cached(&mut self, node_id: &str, output: String, output_hash: String) {
@@ -153,21 +261,37 @@ impl EngineRun {
         self.outputs.insert(node_id.to_string(), output);
     }
 
-    /// After any transition: all Done → Done; nothing runnable left while
-    /// paused → stays Paused; error status is set by `mark_error`.
+    /// After any transition: all nodes terminal → Done, or PartialFail when
+    /// anything errored or was blocked (a "blocked: …" skip reason is a
+    /// precondition failure, not a user-intended prune). Paused runs stay
+    /// Paused; Error is set by `mark_node_error` on non-tolerated failures.
     pub(crate) fn settle(&mut self) -> Option<RunStatus> {
         if self.status.is_terminal() {
             return Some(self.status);
         }
-        if self
-            .nodes
-            .values()
-            .all(|node| node.phase == NodePhase::Done)
-        {
-            self.status = RunStatus::Done;
-            return Some(RunStatus::Done);
+        let all_terminal = self.nodes.values().all(|node| {
+            matches!(
+                node.phase,
+                NodePhase::Done | NodePhase::Error | NodePhase::Skipped
+            )
+        });
+        if !all_terminal {
+            return None;
         }
-        None
+        let any_error = self.nodes.values().any(|node| node.phase == NodePhase::Error);
+        let any_blocked = self.nodes.values().any(|node| {
+            node.phase == NodePhase::Skipped
+                && node
+                    .skip_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("blocked"))
+        });
+        self.status = if any_error || any_blocked {
+            RunStatus::PartialFail
+        } else {
+            RunStatus::Done
+        };
+        Some(self.status)
     }
 
     pub(crate) fn pause(&mut self) {
@@ -177,7 +301,10 @@ impl EngineRun {
     }
 
     pub(crate) fn resume(&mut self) {
-        if matches!(self.status, RunStatus::Paused | RunStatus::Error) {
+        if matches!(
+            self.status,
+            RunStatus::Paused | RunStatus::Error | RunStatus::PartialFail
+        ) {
             self.status = RunStatus::Running;
         }
     }
@@ -234,6 +361,15 @@ impl EngineRun {
         }
     }
 
+    /// After an in-place def swap (resume re-read the workflow file), drop
+    /// state for nodes that no longer exist — otherwise a reset retryable
+    /// node idles as Pending forever, unreachable by dispatch and settle
+    /// alike.
+    pub(crate) fn retain_def_nodes(&mut self) {
+        self.nodes.retain(|id, _| self.def.node(id).is_some());
+        self.outputs.retain(|id, _| self.def.node(id).is_some());
+    }
+
     pub(crate) fn record(&self, started_unix: u64, finished_unix: Option<u64>) -> RunRecord {
         RunRecord {
             run_id: self.run_id.clone(),
@@ -254,6 +390,7 @@ impl EngineRun {
                         output_hash: state.output_hash.clone(),
                         error: state.error.clone(),
                         cached: state.cached,
+                        skip_reason: state.skip_reason.clone(),
                     })
                 })
                 .collect(),
@@ -315,7 +452,7 @@ mod tests {
         let mut run = two_node_run();
         run.mark_running("a");
         assert_eq!(
-            run.mark_error("a", "exit 2".to_string()),
+            run.mark_node_error("a", "exit 2".to_string(), false),
             Some(RunStatus::Error)
         );
         assert_eq!(run.status, RunStatus::Error);
@@ -370,9 +507,140 @@ mod tests {
     #[test]
     fn resume_accepts_error_status() {
         let mut run = two_node_run();
-        run.mark_error("a", "boom".to_string());
+        run.mark_node_error("a", "boom".to_string(), false);
         run.resume();
         assert_eq!(run.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn tolerated_error_skips_downstream_and_settles_partial() {
+        let def = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "prompt_template", "template": "x", "skip_on_error": true},
+                {"id": "b", "type": "prompt_template", "template": "{{a.output}}", "after": ["a"]},
+                {"id": "c", "type": "prompt_template", "template": "{{b.output}}", "after": ["b"]},
+                {"id": "side", "type": "prompt_template", "template": "s"}
+            ]}"#,
+        )
+        .unwrap();
+        let mut run = EngineRun::new(def, "r1".to_string(), "/tmp/x".to_string());
+        // a fails tolerated; the side branch is untouched.
+        assert_eq!(
+            run.mark_node_error("a", "flaky".to_string(), true),
+            None,
+            "run keeps going while the side branch is pending"
+        );
+        assert_eq!(run.status, RunStatus::Running);
+        assert_eq!(run.nodes.get("b").unwrap().phase, NodePhase::Skipped);
+        assert_eq!(
+            run.nodes.get("b").unwrap().skip_reason.as_deref(),
+            Some("upstream_error")
+        );
+        // Cascade: c is skipped because b is.
+        assert_eq!(run.nodes.get("c").unwrap().phase, NodePhase::Skipped);
+        assert_eq!(
+            run.nodes.get("c").unwrap().skip_reason.as_deref(),
+            Some("upstream")
+        );
+        // Empty output ports keep downstream renders well-defined.
+        assert_eq!(run.outputs.get("b").map(String::as_str), Some(""));
+
+        // Side branch completes → all terminal → partial_fail.
+        run.mark_done("side", "ok".to_string(), output_hash("ok"));
+        assert_eq!(run.status, RunStatus::PartialFail);
+    }
+
+    #[test]
+    fn blocked_skip_taints_run_as_partial() {
+        let mut run = two_node_run();
+        // The chain is fully settled by the skip: a blocked, b cascaded.
+        assert_eq!(
+            run.mark_skipped("a", "blocked: provider profile 'x' not found"),
+            Some(RunStatus::PartialFail)
+        );
+        // b cascades as a plain upstream skip.
+        assert_eq!(run.nodes.get("b").unwrap().phase, NodePhase::Skipped);
+        assert_eq!(
+            run.nodes.get("b").unwrap().skip_reason.as_deref(),
+            Some("upstream")
+        );
+        // All terminal now — the blocked reason (not a user prune) settles
+        // the run as partial_fail rather than done.
+        assert_eq!(run.status, RunStatus::PartialFail);
+    }
+
+    #[test]
+    fn disabled_only_skips_settle_done() {
+        let def = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "off", "type": "prompt_template", "template": "t", "enabled": false},
+                {"id": "mid", "type": "prompt_template", "template": "m", "after": ["off"]}
+            ]}"#,
+        )
+        .unwrap();
+        let mut run = EngineRun::new(def, "r1".to_string(), "/tmp/x".to_string());
+        run.mark_skipped("off", "disabled");
+        assert_eq!(run.nodes.get("mid").unwrap().phase, NodePhase::Skipped);
+        // A user-intended prune is a clean done, not a partial failure.
+        assert_eq!(run.status, RunStatus::Done);
+    }
+
+    #[test]
+    fn resume_accepts_partial_fail_status() {
+        let mut run = two_node_run();
+        run.status = RunStatus::PartialFail;
+        run.resume();
+        assert_eq!(run.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn late_transitions_cannot_resurrect_terminal_nodes() {
+        let mut run = two_node_run();
+        run.mark_running("a");
+        run.mark_node_error("a", "timed out".to_string(), false);
+        // The pane dies after the timeout kill: its completion must not
+        // flip the errored node back to Done.
+        assert_eq!(run.mark_done("a", "late".to_string(), output_hash("late")), None);
+        assert_eq!(run.nodes.get("a").unwrap().phase, NodePhase::Error);
+        // A re-fired timeout must not overwrite the recorded error either.
+        run.mark_node_error("a", "timed out again".to_string(), false);
+        assert_eq!(
+            run.nodes.get("a").unwrap().error.as_deref(),
+            Some("timed out")
+        );
+        // Nor can a late skip claim a finished node.
+        let mut run2 = two_node_run();
+        run2.mark_running("a");
+        run2.mark_done("a", "ok".to_string(), output_hash("ok"));
+        run2.mark_skipped("a", "disabled");
+        assert_eq!(run2.nodes.get("a").unwrap().phase, NodePhase::Done);
+    }
+
+    #[test]
+    fn retain_def_nodes_drops_edited_out_state() {
+        let def = WorkflowDef::parse(
+            r#"{"name": "demo", "nodes": [
+                {"id": "a", "type": "prompt_template", "template": "x"},
+                {"id": "leaf", "type": "prompt_template", "template": "l"}
+            ]}"#,
+        )
+        .unwrap();
+        let mut run = EngineRun::new(def, "r1".to_string(), "/tmp/x".to_string());
+        run.mark_done("a", "ok".to_string(), output_hash("ok"));
+        run.mark_node_error("leaf", "boom".to_string(), false);
+        // While paused, the user deletes the failed leaf (W9 fix-and-rerun).
+        run.def.nodes.retain(|node| node.id != "leaf");
+        run.retain_def_nodes();
+        assert!(run.nodes.get("leaf").is_none());
+        assert!(run.outputs.get("leaf").is_none());
+        // Resume: nothing retryable remains, every node is Done — the run
+        // must settle instead of wedging live at Running.
+        run.resume();
+        let idle = run.nodes.values().all(|node| {
+            !matches!(node.phase, NodePhase::Pending | NodePhase::Running)
+        });
+        assert!(idle, "no Pending/Running nodes survive the prune");
+        assert_eq!(run.settle(), Some(RunStatus::Done));
     }
 
     #[test]

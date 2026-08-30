@@ -69,10 +69,14 @@ pub struct WorkflowUpdateParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkflowNodeInfo {
     pub id: String,
-    /// pending | running | done | error
+    /// pending | running | done | error | skipped
     pub phase: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why a skipped node was skipped ("disabled", "blocked: …",
+    /// "upstream", "upstream_error").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     #[serde(default)]
     pub cached: bool,
 }
@@ -82,7 +86,7 @@ pub struct WorkflowRunInfo {
     pub run_id: String,
     pub workflow_name: String,
     pub workflow_path: String,
-    /// running | paused | cancelled | done | error
+    /// running | paused | cancelled | done | error | partial_fail
     pub status: String,
     pub started_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

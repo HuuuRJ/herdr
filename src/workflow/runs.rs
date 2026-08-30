@@ -18,6 +18,9 @@ pub(crate) enum RunStatus {
     Paused,
     Cancelled,
     Done,
+    /// Terminal: some nodes errored (tolerated by `skip_on_error`) or were
+    /// blocked, while the rest completed (FR-5.2/FR-9.4).
+    PartialFail,
     Error,
 }
 
@@ -28,12 +31,16 @@ impl RunStatus {
             Self::Paused => "paused",
             Self::Cancelled => "cancelled",
             Self::Done => "done",
+            Self::PartialFail => "partial_fail",
             Self::Error => "error",
         }
     }
 
     pub(crate) fn is_terminal(self) -> bool {
-        matches!(self, Self::Cancelled | Self::Done | Self::Error)
+        matches!(
+            self,
+            Self::Cancelled | Self::Done | Self::PartialFail | Self::Error
+        )
     }
 }
 
@@ -44,6 +51,10 @@ pub(crate) enum NodePhase {
     Running,
     Done,
     Error,
+    /// Terminal: structurally or failure-derived skip. Free-text
+    /// `skip_reason`: "disabled", "blocked: …", "upstream",
+    /// "upstream_error", later "when_false: …".
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,6 +67,8 @@ pub(crate) struct NodeRecord {
     pub error: Option<String>,
     #[serde(default)]
     pub cached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -362,6 +375,7 @@ mod tests {
                 output_hash: Some("h".to_string()),
                 error: None,
                 cached: false,
+                skip_reason: None,
             }],
         }
     }
@@ -446,6 +460,34 @@ mod tests {
         );
         assert_eq!(load_all_records_at(&root).len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pre_p3_record_without_skip_reason_parses() {
+        // Records written before the Skipped phase carry no skip_reason.
+        let legacy = r#"{
+            "run_id": "r1", "workflow_name": "demo",
+            "workflow_path": "/tmp/demo.aflow.json", "status": "error",
+            "started_unix": 1, "finished_unix": 2,
+            "nodes": [{"id": "a", "phase": "done", "output_hash": "h", "cached": false}]
+        }"#;
+        let parsed: RunRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.nodes[0].phase, NodePhase::Done);
+        assert_eq!(parsed.nodes[0].skip_reason, None);
+    }
+
+    #[test]
+    fn skipped_record_round_trips_with_reason() {
+        let mut rec = record("r2", 5);
+        rec.nodes[0].phase = NodePhase::Skipped;
+        rec.nodes[0].skip_reason = Some("blocked: provider profile 'x' not found".to_string());
+        let json = serde_json::to_string(&rec).unwrap();
+        let parsed: RunRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.nodes[0].phase, NodePhase::Skipped);
+        assert_eq!(
+            parsed.nodes[0].skip_reason.as_deref(),
+            Some("blocked: provider profile 'x' not found")
+        );
     }
 
     #[test]

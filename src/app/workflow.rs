@@ -136,7 +136,7 @@ impl crate::app::App {
                 let status = live.engine.status;
                 self.workflow_runs.insert(run_id.to_string(), live);
                 return Err(format!(
-                    "run {run_id} is {} ; only paused or errored runs resume",
+                    "run {run_id} is {} ; only paused runs resume in place (errored runs finish draining first)",
                     status.as_str()
                 ));
             }
@@ -144,8 +144,9 @@ impl crate::app::App {
                 .map_err(|err| format!("failed to re-read workflow file: {err}"))?;
             let def = WorkflowDef::parse(&text)?;
             live.engine.def = def;
+            live.engine.retain_def_nodes();
             live.engine.resume();
-            reset_errored_nodes(&mut live.engine);
+            reset_retryable_nodes(&mut live.engine);
             live.engine
                 .invalidate_stale_done_nodes(|node_id, config_hash, inputs_hash| {
                     runs::load_cached_node(run_id, node_id, config_hash, inputs_hash).is_some()
@@ -160,9 +161,12 @@ impl crate::app::App {
         let Some(record) = runs::load_record(run_id) else {
             return Err(format!("run {run_id} not found"));
         };
-        if !matches!(record.status, RunStatus::Paused | RunStatus::Error) {
+        if !matches!(
+            record.status,
+            RunStatus::Paused | RunStatus::Error | RunStatus::PartialFail
+        ) {
             return Err(format!(
-                "run {run_id} is {} ; only paused or errored runs resume",
+                "run {run_id} is {} ; only paused, errored, or partially-failed runs resume",
                 record.status.as_str()
             ));
         }
@@ -209,7 +213,7 @@ impl crate::app::App {
             }
         }
         // Failed nodes re-run on resume (W9 fix-and-rerun).
-        reset_errored_nodes(&mut engine);
+        reset_retryable_nodes(&mut engine);
         // Done nodes edited while the run was paused (or stranded by an
         // upstream reset) cascade back to Pending; unchanged ones stay Done
         // and the cache reloads their outputs below.
@@ -319,11 +323,11 @@ impl crate::app::App {
         let max_concurrent = self.config_workflow_max_agents();
         let mut dispatched_any = false;
         let run_ids: Vec<String> = self.workflow_runs.keys().cloned().collect();
-        for run_id in run_ids {
+        for run_id in &run_ids {
             loop {
                 let in_flight = self.workflow_agent_in_flight();
                 let ready = {
-                    let Some(live) = self.workflow_runs.get(&run_id) else {
+                    let Some(live) = self.workflow_runs.get(run_id) else {
                         break;
                     };
                     live.engine.ready_nodes(in_flight, max_concurrent)
@@ -331,14 +335,42 @@ impl crate::app::App {
                 let Some(node_id) = ready.first().cloned() else {
                     break;
                 };
-                if !self.dispatch_workflow_node(&run_id, &node_id) {
+                if !self.dispatch_workflow_node(run_id, &node_id) {
                     break;
                 }
                 dispatched_any = true;
             }
         }
+        // A rebuilt run can arrive fully settled (an empty node list, or a
+        // resume whose failed nodes were edited out of the workflow file):
+        // no event will ever fire, so close it out instead of wedging it
+        // live at Running.
+        for run_id in &run_ids {
+            self.settle_workflow_run_if_idle(run_id);
+        }
         if dispatched_any {
             self.schedule_session_save();
+        }
+    }
+
+    /// Settle a live run that has nothing Pending or Running left but never
+    /// saw a terminal transition (rebuilt-from-record paths only).
+    fn settle_workflow_run_if_idle(&mut self, run_id: &str) {
+        let outcome = {
+            let Some(live) = self.workflow_runs.get_mut(run_id) else {
+                return;
+            };
+            let idle = live.engine.status == RunStatus::Running
+                && live.engine.nodes.values().all(|node| {
+                    !matches!(node.phase, NodePhase::Pending | NodePhase::Running)
+                });
+            if !idle {
+                return;
+            }
+            live.engine.settle()
+        };
+        if outcome.is_some() {
+            self.advance_workflow_run(run_id);
         }
     }
 
@@ -356,14 +388,10 @@ impl crate::app::App {
         else {
             return false;
         };
-        // Structurally skipped (disabled, or downstream of a disabled node):
-        // empty output port, no spawn, no concurrency slot.
-        if self
-            .workflow_runs
-            .get(run_id)
-            .is_some_and(|live| live.engine.def.is_structurally_skipped(&node.id))
-        {
-            self.complete_workflow_node(run_id, &node.id, String::new(), &NodeMeta::default());
+        // Disabled nodes are structurally skipped: empty output port, no
+        // spawn, no concurrency slot. Downstream cascades in the engine.
+        if !node.enabled {
+            self.skip_workflow_node(run_id, &node.id, "disabled");
             return true;
         }
         match node.node_type {
@@ -394,14 +422,27 @@ impl crate::app::App {
 
     fn dispatch_image_node(&mut self, run_id: &str, node: &WorkflowNode) -> bool {
         let profile = self.workflow_profile_for(run_id, node);
-        let Some(profile) = profile else {
-            self.fail_workflow_node(
-                run_id,
-                &node.id,
-                "image_gen requires a bound openai-compat provider profile".to_string(),
-            );
-            return false;
+        // A missing or disabled bound profile is a precondition failure
+        // (FR-9.1): blocked, not an execution error.
+        let blocked = match &profile {
+            Some(profile) if profile.is_disabled => Some(format!(
+                "blocked: provider profile '{}' is disabled",
+                profile.id
+            )),
+            None if node.provider_profile_id.is_none() => Some(
+                "blocked: image_gen requires a bound openai-compat provider profile".to_string(),
+            ),
+            None => Some(format!(
+                "blocked: provider profile '{}' not found",
+                node.provider_profile_id.as_deref().unwrap_or("?")
+            )),
+            Some(_) => None,
         };
+        if let Some(reason) = blocked {
+            self.skip_workflow_node(run_id, &node.id, &reason);
+            return true;
+        }
+        let profile = profile.expect("checked above");
         let prompt = {
             let Some(live) = self.workflow_runs.get(run_id) else {
                 return false;
@@ -473,16 +514,22 @@ impl crate::app::App {
 
     fn dispatch_agent_node(&mut self, run_id: &str, node: &WorkflowNode) -> bool {
         let profile = self.workflow_profile_for(run_id, node);
-        if node.provider_profile_id.is_some() && profile.is_none() {
-            self.fail_workflow_node(
-                run_id,
-                &node.id,
-                format!(
-                    "provider profile '{}' not found",
-                    node.provider_profile_id.as_deref().unwrap_or("?")
-                ),
-            );
-            return false;
+        // Bound-but-unusable profile = blocked precondition (FR-9.1); an
+        // unbound agent node legitimately uses the CLI's own config.
+        let blocked = match &profile {
+            Some(profile) if profile.is_disabled => Some(format!(
+                "blocked: provider profile '{}' is disabled",
+                profile.id
+            )),
+            None if node.provider_profile_id.is_some() => Some(format!(
+                "blocked: provider profile '{}' not found",
+                node.provider_profile_id.as_deref().unwrap_or("?")
+            )),
+            _ => None,
+        };
+        if let Some(reason) = blocked {
+            self.skip_workflow_node(run_id, &node.id, &reason);
+            return true;
         }
         let prompt = {
             let Some(live) = self.workflow_runs.get(run_id) else {
@@ -1002,6 +1049,19 @@ impl crate::app::App {
         let Some(live) = self.workflow_runs.get_mut(run_id) else {
             return;
         };
+        // A late completion (pane death racing the timeout kill, a duplicated
+        // report) must not resurrect a node that already reached a terminal
+        // phase, nor overwrite its persisted result.
+        let terminal = live.engine.nodes.get(node_id).is_some_and(|node| {
+            matches!(
+                node.phase,
+                NodePhase::Done | NodePhase::Error | NodePhase::Skipped
+            )
+        });
+        if terminal {
+            tracing::debug!(run_id, node_id, "late node completion ignored");
+            return;
+        }
         let (config_hash, inputs_hash) = workflow_cache_keys(&live.engine, node_id);
         let meta = NodeMeta {
             config_hash,
@@ -1015,13 +1075,8 @@ impl crate::app::App {
                 crate::workflow::runs::output_hash(&output)
             }
         };
-        let outcome = live.engine.mark_done(node_id, output, hash);
-        if let Some(status) = outcome {
-            self.finish_workflow_run(run_id, status);
-        } else {
-            self.persist_workflow_run(run_id);
-            self.dispatch_workflow_ready_nodes();
-        }
+        live.engine.mark_done(node_id, output, hash);
+        self.advance_workflow_run(run_id);
     }
 
     fn fail_workflow_node(&mut self, run_id: &str, node_id: &str, error: String) {
@@ -1030,8 +1085,56 @@ impl crate::app::App {
         let Some(live) = self.workflow_runs.get_mut(run_id) else {
             return;
         };
-        live.engine.mark_error(node_id, error);
-        self.finish_workflow_run(run_id, RunStatus::Error);
+        // Drop the bookkeeping so a stale deadline cannot re-fire the
+        // timeout tick on an already-failed node while the run drains.
+        live.deadline_of_node.remove(node_id);
+        live.pid_of_node.remove(node_id);
+        // FR-5.2: a node declaring skip_on_error doesn't block the run —
+        // downstream is skipped and the run settles into partial_fail.
+        let tolerated = live
+            .engine
+            .def
+            .node(node_id)
+            .is_some_and(|node| node.skip_on_error);
+        live.engine.mark_node_error(node_id, error, tolerated);
+        self.advance_workflow_run(run_id);
+    }
+
+    /// Structural skip (FR-9.4): disabled node or blocked precondition. No
+    /// spawn, no slot; the engine cascades downstream and settles the run.
+    fn skip_workflow_node(&mut self, run_id: &str, node_id: &str, reason: &str) {
+        if let Some(live) = self.workflow_runs.get_mut(run_id) {
+            live.engine.mark_skipped(node_id, reason);
+        }
+        self.advance_workflow_run(run_id);
+    }
+
+    /// Shared tail for every node terminal transition. A terminal status
+    /// finishes the run only once nothing is still running — a failed run
+    /// drains its in-flight siblings so their results land on disk instead
+    /// of being orphaned mid-"running" (previously the live entry was
+    /// dropped immediately and sibling completion events went unclaimed).
+    fn advance_workflow_run(&mut self, run_id: &str) {
+        let (status, busy) = {
+            let Some(live) = self.workflow_runs.get(run_id) else {
+                return;
+            };
+            (
+                live.engine.status,
+                live.engine
+                    .nodes
+                    .values()
+                    .any(|node| node.phase == NodePhase::Running),
+            )
+        };
+        if status.is_terminal() && !busy {
+            self.finish_workflow_run(run_id, status);
+        } else {
+            self.persist_workflow_run(run_id);
+            if !status.is_terminal() {
+                self.dispatch_workflow_ready_nodes();
+            }
+        }
     }
 
     /// Redact a node's captured text/error against its bound profile key —
@@ -1323,6 +1426,7 @@ impl crate::app::App {
                             .unwrap_or_else(|| "pending".to_string()),
                         cached: state.is_some_and(|state| state.cached),
                         error: state.and_then(|state| state.error.clone()),
+                        skip_reason: state.and_then(|state| state.skip_reason.clone()),
                         cost_usd: meta.as_ref().and_then(|meta| meta.cost_usd),
                         tokens: meta.as_ref().and_then(|meta| meta.tokens),
                         artifact: meta.as_ref().and_then(|meta| meta.artifact.clone()),
@@ -1371,6 +1475,7 @@ impl crate::app::App {
                         .unwrap_or_else(|| "pending".to_string()),
                     cached: node_record.is_some_and(|n| n.cached),
                     error: node_record.and_then(|n| n.error.clone()),
+                    skip_reason: node_record.and_then(|n| n.skip_reason.clone()),
                     cost_usd: meta.as_ref().and_then(|meta| meta.cost_usd),
                     tokens: meta.as_ref().and_then(|meta| meta.tokens),
                     artifact: meta.as_ref().and_then(|meta| meta.artifact.clone()),
@@ -1403,19 +1508,21 @@ fn node_kind_str(node_type: NodeType) -> &'static str {
     }
 }
 
-/// Failed nodes re-run on resume (W9 fix-and-rerun).
-fn reset_errored_nodes(engine: &mut EngineRun) {
-    let errored: Vec<String> = engine
+/// Failed and skipped nodes re-run on resume (W9 fix-and-rerun); skips are
+/// derived state, re-derived on the next dispatch pass.
+fn reset_retryable_nodes(engine: &mut EngineRun) {
+    let retryable: Vec<String> = engine
         .nodes
         .iter()
-        .filter(|(_, node)| node.phase == NodePhase::Error)
+        .filter(|(_, node)| matches!(node.phase, NodePhase::Error | NodePhase::Skipped))
         .map(|(id, _)| id.clone())
         .collect();
-    for node_id in errored {
+    for node_id in retryable {
         if let Some(node) = engine.nodes.get_mut(&node_id) {
             node.phase = NodePhase::Pending;
             node.output_hash = None;
             node.error = None;
+            node.skip_reason = None;
             node.cached = false;
         }
     }
@@ -1498,6 +1605,7 @@ pub(crate) fn node_phase_str(phase: NodePhase) -> &'static str {
         NodePhase::Running => "running",
         NodePhase::Done => "done",
         NodePhase::Error => "error",
+        NodePhase::Skipped => "skipped",
     }
 }
 

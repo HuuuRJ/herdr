@@ -109,10 +109,16 @@ pub(crate) struct WorkflowNode {
     /// Run in a visible pane (true) or a background process (false).
     #[serde(default = "default_true")]
     pub visible: bool,
-    /// Disabled nodes (and their transitive downstream) are structurally
-    /// skipped: they complete with an empty output port without spawning.
+    /// Disabled nodes are structurally skipped: empty output port, no spawn;
+    /// the engine cascades the skip downstream.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Tolerate this node failing: downstream is skipped instead of the run
+    /// failing outright; the run settles into `partial_fail` (FR-5.2).
+    /// False is omitted from the serialized form so pre-existing cache
+    /// hashes stay valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_on_error: bool,
     /// 0 = no timeout.
     #[serde(default)]
     pub timeout_ms: u64,
@@ -148,6 +154,10 @@ pub(crate) struct WorkflowNode {
 
 fn default_true() -> bool {
     true
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl WorkflowNode {
@@ -432,21 +442,6 @@ impl WorkflowDef {
         }
         seen.into_iter().collect()
     }
-
-    /// A node is structurally skipped when it is disabled or any transitive
-    /// dependency is disabled — skip propagates downstream so later paid
-    /// agents never run on empty upstream ports (AgentFlow FR-4.4/FR-9.4).
-    pub(crate) fn is_structurally_skipped(&self, node_id: &str) -> bool {
-        let Some(node) = self.node(node_id) else {
-            return false;
-        };
-        if !node.enabled {
-            return true;
-        }
-        self.transitive_deps(node_id)
-            .iter()
-            .any(|dep| self.node(dep).is_some_and(|upstream| !upstream.enabled))
-    }
 }
 
 /// `{{node_id.output}}` references inside an agent prompt, template, or
@@ -715,19 +710,31 @@ mod tests {
     }
 
     #[test]
-    fn skip_propagates_to_transitive_downstream() {
-        let def = WorkflowDef::parse(
-            r#"{"name": "demo", "nodes": [
-                {"id": "off", "type": "prompt_template", "template": "t", "enabled": false},
-                {"id": "mid", "type": "prompt_template", "template": "m", "after": ["off"]},
-                {"id": "far", "type": "agent", "runtime": "claude-code", "prompt": "{{mid.output}}", "after": ["mid"]},
-                {"id": "side", "type": "prompt_template", "template": "s"}
-            ]}"#,
+    fn skip_on_error_defaults_false_and_participates_in_cache_hash() {
+        let base: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "agent").trim_end_matches('}').to_string()
+                + r#", "runtime": "claude-code", "prompt": "p"}"#),
         )
         .unwrap();
-        assert!(def.is_structurally_skipped("off"));
-        assert!(def.is_structurally_skipped("mid"));
-        assert!(def.is_structurally_skipped("far"));
-        assert!(!def.is_structurally_skipped("side"));
+        assert!(!base.skip_on_error);
+        let tolerant: WorkflowNode = serde_json::from_str(
+            &(node_json("a", "agent").trim_end_matches('}').to_string()
+                + r#", "runtime": "claude-code", "prompt": "p", "skip_on_error": true}"#),
+        )
+        .unwrap();
+        assert!(tolerant.skip_on_error);
+        assert_ne!(
+            base.cache_projection(),
+            tolerant.cache_projection(),
+            "toggling skip_on_error must invalidate the node cache key"
+        );
+        // A false value serializes away entirely: the projection (and thus
+        // the cache hash) is byte-identical to a pre-P3a node, so existing
+        // on-disk caches survive the upgrade.
+        let projection = base.cache_projection().to_string();
+        assert!(
+            !projection.contains("skip_on_error"),
+            "false must not leak into the cache projection: {projection}"
+        );
     }
 }

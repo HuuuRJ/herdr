@@ -35,6 +35,7 @@ fn run_info(record: &RunRecord) -> WorkflowRunInfo {
                 id: node.id.clone(),
                 phase: node_phase_str(node.phase).to_string(),
                 error: node.error.clone(),
+                skip_reason: node.skip_reason.clone(),
                 cached: node.cached,
             })
             .collect(),
